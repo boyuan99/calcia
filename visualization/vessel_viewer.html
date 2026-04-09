@@ -1,0 +1,841 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Calcia - Blood Vessel 3D Viewer</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #1a1a2e;
+            color: #eee;
+            overflow: hidden;
+        }
+        #container {
+            width: 100vw;
+            height: 100vh;
+        }
+        #controls {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 20px;
+            border-radius: 10px;
+            min-width: 250px;
+            max-height: 90vh;
+            overflow-y: auto;
+        }
+        h1 {
+            font-size: 1.5rem;
+            margin-bottom: 15px;
+            color: #ff6b6b;
+        }
+        .control-group {
+            margin-bottom: 15px;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-size: 0.9rem;
+            color: #aaa;
+        }
+        select, button, input[type="file"] {
+            width: 100%;
+            padding: 8px 12px;
+            border: none;
+            border-radius: 5px;
+            background: #2d2d44;
+            color: #fff;
+            font-size: 0.9rem;
+            cursor: pointer;
+        }
+        select:hover, button:hover {
+            background: #3d3d54;
+        }
+        button {
+            background: #ff6b6b;
+            color: #1a1a2e;
+            font-weight: bold;
+            margin-top: 5px;
+        }
+        button:hover {
+            background: #ff5252;
+        }
+        .checkbox-group {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .checkbox-group input {
+            width: auto;
+        }
+        input[type="range"] {
+            width: 100%;
+            margin-top: 5px;
+        }
+        #info {
+            position: absolute;
+            bottom: 20px;
+            left: 20px;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 15px;
+            border-radius: 10px;
+            font-size: 0.85rem;
+            color: #aaa;
+        }
+        #stats {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 15px;
+            border-radius: 10px;
+            font-size: 0.85rem;
+            color: #aaa;
+            min-width: 200px;
+        }
+        #stats h3 {
+            color: #ff6b6b;
+            margin-bottom: 10px;
+            font-size: 1rem;
+        }
+        #stats .stat-row {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 5px;
+        }
+        #stats .stat-value {
+            color: #fff;
+            font-weight: bold;
+        }
+        #stats .stat-section {
+            margin-top: 10px;
+            padding-top: 10px;
+            border-top: 1px solid #444;
+        }
+        #loading {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            font-size: 1.5rem;
+            color: #ff6b6b;
+        }
+        .hidden {
+            display: none !important;
+        }
+        #tooltip {
+            position: absolute;
+            background: rgba(0, 0, 0, 0.85);
+            color: #fff;
+            padding: 10px 15px;
+            border-radius: 8px;
+            font-size: 0.9rem;
+            pointer-events: none;
+            z-index: 1000;
+            display: none;
+            border: 1px solid #ff6b6b;
+            max-width: 250px;
+        }
+        #tooltip .type-name {
+            color: #ff6b6b;
+            font-weight: bold;
+            font-size: 1.1rem;
+            margin-bottom: 5px;
+        }
+        #tooltip .type-info {
+            color: #aaa;
+            font-size: 0.85rem;
+        }
+        .legend {
+            margin-top: 15px;
+            padding-top: 10px;
+            border-top: 1px solid #444;
+        }
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 5px;
+            font-size: 0.8rem;
+        }
+        .legend-color {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+        }
+        .section-title {
+            color: #ff6b6b;
+            font-size: 0.9rem;
+            margin-top: 15px;
+            margin-bottom: 10px;
+            padding-top: 10px;
+            border-top: 1px solid #444;
+        }
+    </style>
+</head>
+<body>
+    <div id="container"></div>
+
+    <div id="controls">
+        <h1>Vessel Viewer</h1>
+
+        <div class="control-group">
+            <label>Load Data</label>
+            <button id="loadBtn">Load vessels_data.json</button>
+        </div>
+
+        <div class="control-group">
+            <label>Or upload JSON file</label>
+            <input type="file" id="fileInput" accept=".json">
+        </div>
+
+        <div class="section-title">Render Mode</div>
+
+        <div class="control-group">
+            <label class="checkbox-group">
+                <input type="checkbox" id="useTubes" checked>
+                Realistic Tubes (slower)
+            </label>
+        </div>
+
+        <div class="control-group">
+            <label class="checkbox-group">
+                <input type="checkbox" id="showNodes" checked>
+                Show Nodes
+            </label>
+        </div>
+
+        <div class="section-title">Vessel Types</div>
+
+        <div class="control-group">
+            <label class="checkbox-group">
+                <input type="checkbox" id="showSurface" checked>
+                Surface Vessels (15 μm)
+            </label>
+        </div>
+
+        <div class="control-group">
+            <label class="checkbox-group">
+                <input type="checkbox" id="showDiving" checked>
+                Diving Vessels (9 μm)
+            </label>
+        </div>
+
+        <div class="control-group">
+            <label class="checkbox-group">
+                <input type="checkbox" id="showCapillary" checked>
+                Capillaries (2 μm)
+            </label>
+        </div>
+
+        <div class="section-title">Size Controls</div>
+
+        <div class="control-group">
+            <label>Radius Scale: <span id="radiusScaleVal">1.0</span>x</label>
+            <input type="range" id="radiusScale" min="0.2" max="3" step="0.1" value="1.0">
+        </div>
+
+        <div class="control-group">
+            <label>Tube Segments: <span id="tubeSegmentsVal">8</span></label>
+            <input type="range" id="tubeSegments" min="4" max="16" step="2" value="8">
+        </div>
+
+        <div class="control-group">
+            <button id="resetCamera">Reset Camera</button>
+        </div>
+
+        <div class="legend">
+            <div class="legend-item">
+                <div class="legend-color" style="background: #00ff00;"></div>
+                <span>Source (Surface Entry)</span>
+            </div>
+            <div class="legend-item">
+                <div class="legend-color" style="background: #ff0000;"></div>
+                <span>Diving Vessels</span>
+            </div>
+            <div class="legend-item">
+                <div class="legend-color" style="background: #00ffff;"></div>
+                <span>Capillaries</span>
+            </div>
+            <div class="legend-item">
+                <div class="legend-color" style="background: #888888;"></div>
+                <span>Internal Nodes</span>
+            </div>
+        </div>
+    </div>
+
+    <div id="stats">
+        <h3>Network Stats</h3>
+        <div class="stat-row">
+            <span>Total Nodes:</span>
+            <span class="stat-value" id="statNodes">-</span>
+        </div>
+        <div class="stat-row">
+            <span>Connections:</span>
+            <span class="stat-value" id="statConns">-</span>
+        </div>
+        <div class="stat-row">
+            <span>Source:</span>
+            <span class="stat-value" id="statSource">-</span>
+        </div>
+        <div class="stat-row">
+            <span>Diving:</span>
+            <span class="stat-value" id="statDiving">-</span>
+        </div>
+        <div class="stat-row">
+            <span>Capillary:</span>
+            <span class="stat-value" id="statCap">-</span>
+        </div>
+
+        <div class="stat-section">
+            <h3>Vessel Radii (μm)</h3>
+            <div class="stat-row">
+                <span>Surface:</span>
+                <span class="stat-value" id="radSurface">15</span>
+            </div>
+            <div class="stat-row">
+                <span>Diving:</span>
+                <span class="stat-value" id="radDiving">9</span>
+            </div>
+            <div class="stat-row">
+                <span>Capillary:</span>
+                <span class="stat-value" id="radCapillary">2</span>
+            </div>
+        </div>
+    </div>
+
+    <div id="info">
+        <strong>Controls:</strong><br>
+        Left click + drag: Rotate<br>
+        Right click + drag: Pan<br>
+        Scroll: Zoom
+    </div>
+
+    <div id="loading">Loading Three.js...</div>
+    <div id="tooltip"></div>
+
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+            "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+        }
+    }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+        // Hide loading message
+        document.getElementById('loading').classList.add('hidden');
+
+        // Scene setup
+        const container = document.getElementById('container');
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x1a1a2e);
+
+        const camera = new THREE.PerspectiveCamera(
+            60,
+            window.innerWidth / window.innerHeight,
+            0.1,
+            2000
+        );
+        camera.position.set(150, 150, 150);
+
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(window.devicePixelRatio);
+        container.appendChild(renderer.domElement);
+
+        // Controls
+        const controls = new OrbitControls(camera, renderer.domElement);
+        controls.enableDamping = true;
+        controls.dampingFactor = 0.05;
+
+        // Lighting
+        const ambientLight = new THREE.AmbientLight(0x404040, 0.6);
+        scene.add(ambientLight);
+
+        const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+        directionalLight.position.set(100, 100, 100);
+        scene.add(directionalLight);
+
+        const directionalLight2 = new THREE.DirectionalLight(0xffffff, 0.4);
+        directionalLight2.position.set(-100, -50, -100);
+        scene.add(directionalLight2);
+
+        // Add hemisphere light for better ambient
+        const hemiLight = new THREE.HemisphereLight(0xffffff, 0x444444, 0.3);
+        scene.add(hemiLight);
+
+        // Grid helper
+        const gridHelper = new THREE.GridHelper(200, 20, 0x444444, 0x333333);
+        scene.add(gridHelper);
+
+        // Axes helper
+        const axesHelper = new THREE.AxesHelper(20);
+        scene.add(axesHelper);
+
+        // Store meshes
+        let nodeMeshes = [];
+        let vesselMeshes = [];
+        let vesselData = null;
+
+        // Vessel radii in micrometers
+        const vesselRadii = {
+            surface: 15,  // Surface vessels
+            diving: 9,    // Diving vessels
+            capillary: 2, // Capillaries
+        };
+
+        // Colors for vessel types
+        const typeColors = {
+            0: 0x888888,  // Internal - gray
+            1: 0x00ff00,  // Source - green
+            2: 0x00aa00,  // Branch - dark green
+            3: 0xff0000,  // Diving - red
+            4: 0x00ffff,  // Capillary - cyan
+        };
+
+        const typeNames = {
+            0: 'Internal Node',
+            1: 'Source (Surface Entry)',
+            2: 'Branch Point',
+            3: 'Diving Vessel',
+            4: 'Capillary',
+        };
+
+        // Get radius for a connection based on node types
+        function getVesselRadius(startType, endType) {
+            const scale = parseFloat(document.getElementById('radiusScale').value);
+
+            if (startType === 3 || endType === 3) {
+                return vesselRadii.diving * scale;
+            } else if (startType === 4 || endType === 4) {
+                return vesselRadii.capillary * scale;
+            } else {
+                return vesselRadii.surface * scale;
+            }
+        }
+
+        // Get color for a connection based on node types
+        function getVesselColor(startType, endType) {
+            if (startType === 3 || endType === 3) {
+                return 0xff0000; // Diving - red
+            } else if (startType === 4 || endType === 4) {
+                return 0x00ffff; // Capillary - cyan
+            } else if (startType === 1 || endType === 1) {
+                return 0x00ff00; // Source - green
+            }
+            return 0x888888; // Default gray
+        }
+
+        function clearScene() {
+            nodeMeshes.forEach(mesh => {
+                mesh.geometry.dispose();
+                mesh.material.dispose();
+                scene.remove(mesh);
+            });
+            vesselMeshes.forEach(mesh => {
+                mesh.geometry.dispose();
+                mesh.material.dispose();
+                scene.remove(mesh);
+            });
+            nodeMeshes = [];
+            vesselMeshes = [];
+        }
+
+        function createNodeMesh(position, type, radius) {
+            const geometry = new THREE.SphereGeometry(radius * 1.2, 16, 16);
+            const material = new THREE.MeshPhongMaterial({
+                color: typeColors[type] || 0xffffff,
+                transparent: true,
+                opacity: 0.9,
+                shininess: 30,
+            });
+            const mesh = new THREE.Mesh(geometry, material);
+            mesh.position.set(position[0], position[2], position[1]); // Swap Y and Z
+            mesh.userData = { type: type, originalPosition: position };
+            return mesh;
+        }
+
+        // Create a tube geometry following a path
+        function createTubeMesh(points, radius, color) {
+            if (points.length < 2) return null;
+
+            // Convert points to Vector3 (swap Y and Z for visualization)
+            const pathPoints = points.map(p => new THREE.Vector3(p[0], p[2], p[1]));
+
+            // Create smooth curve
+            const curve = new THREE.CatmullRomCurve3(pathPoints);
+
+            // Tube parameters
+            const tubularSegments = Math.max(points.length * 2, 8);
+            const radialSegments = parseInt(document.getElementById('tubeSegments').value);
+
+            const geometry = new THREE.TubeGeometry(
+                curve,
+                tubularSegments,
+                radius,
+                radialSegments,
+                false // not closed
+            );
+
+            const material = new THREE.MeshPhongMaterial({
+                color: color,
+                transparent: true,
+                opacity: 0.85,
+                shininess: 50,
+                side: THREE.DoubleSide,
+            });
+
+            return new THREE.Mesh(geometry, material);
+        }
+
+        // Create a simple line (fallback for performance)
+        function createLineMesh(points, color) {
+            const positions = [];
+            points.forEach(p => {
+                positions.push(p[0], p[2], p[1]); // Swap Y and Z
+            });
+
+            const geometry = new THREE.BufferGeometry();
+            geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+
+            const material = new THREE.LineBasicMaterial({
+                color: color,
+                linewidth: 2,
+            });
+
+            return new THREE.Line(geometry, material);
+        }
+
+        function loadVesselData(data) {
+            clearScene();
+            vesselData = data;
+
+            const useTubes = document.getElementById('useTubes').checked;
+            const showNodes = document.getElementById('showNodes').checked;
+
+            console.log(`Loading ${data.nodes.length} nodes, ${data.connections.length} connections`);
+            console.log(`Render mode: ${useTubes ? 'Realistic Tubes' : 'Lines'}`);
+
+            // Create vessel meshes (tubes or lines)
+            data.connections.forEach(conn => {
+                const color = getVesselColor(conn.start_type, conn.end_type);
+                const radius = getVesselRadius(conn.start_type, conn.end_type);
+
+                let mesh;
+                if (useTubes && conn.points.length >= 2) {
+                    mesh = createTubeMesh(conn.points, radius, color);
+                } else {
+                    mesh = createLineMesh(conn.points, color);
+                }
+
+                if (mesh) {
+                    mesh.userData = {
+                        start_type: conn.start_type,
+                        end_type: conn.end_type,
+                        radius: radius,
+                    };
+                    scene.add(mesh);
+                    vesselMeshes.push(mesh);
+                }
+            });
+
+            // Create node meshes
+            if (showNodes) {
+                data.nodes.forEach((node, i) => {
+                    // Determine node radius based on type
+                    let nodeRadius;
+                    if (node.type === 3) {
+                        nodeRadius = vesselRadii.diving;
+                    } else if (node.type === 4) {
+                        nodeRadius = vesselRadii.capillary;
+                    } else {
+                        nodeRadius = vesselRadii.surface;
+                    }
+                    nodeRadius *= parseFloat(document.getElementById('radiusScale').value);
+
+                    const mesh = createNodeMesh(node.position, node.type, nodeRadius);
+                    mesh.userData.nodeIndex = i;
+                    mesh.userData.nodeData = node;
+                    scene.add(mesh);
+                    nodeMeshes.push(mesh);
+                });
+            }
+
+            // Update stats
+            updateStats(data);
+
+            // Update visibility
+            updateVisibility();
+
+            // Fit camera
+            fitCameraToScene();
+        }
+
+        function updateStats(data) {
+            document.getElementById('statNodes').textContent = data.nodes.length;
+            document.getElementById('statConns').textContent = data.connections.length;
+
+            let sourceCount = 0, divingCount = 0, capCount = 0;
+            data.nodes.forEach(n => {
+                if (n.type === 1) sourceCount++;
+                else if (n.type === 3) divingCount++;
+                else if (n.type === 4) capCount++;
+            });
+            document.getElementById('statSource').textContent = sourceCount;
+            document.getElementById('statDiving').textContent = divingCount;
+            document.getElementById('statCap').textContent = capCount;
+
+            // Update radii display
+            const scale = parseFloat(document.getElementById('radiusScale').value);
+            document.getElementById('radSurface').textContent = (vesselRadii.surface * scale).toFixed(1);
+            document.getElementById('radDiving').textContent = (vesselRadii.diving * scale).toFixed(1);
+            document.getElementById('radCapillary').textContent = (vesselRadii.capillary * scale).toFixed(1);
+        }
+
+        function updateVisibility() {
+            const showNodes = document.getElementById('showNodes').checked;
+            const showSurface = document.getElementById('showSurface').checked;
+            const showDiving = document.getElementById('showDiving').checked;
+            const showCapillary = document.getElementById('showCapillary').checked;
+
+            // Update node visibility
+            nodeMeshes.forEach(mesh => {
+                const type = mesh.userData.type;
+                let visible = showNodes;
+
+                if (type === 1 || type === 0 || type === 2) {
+                    visible = visible && showSurface;
+                } else if (type === 3) {
+                    visible = visible && showDiving;
+                } else if (type === 4) {
+                    visible = visible && showCapillary;
+                }
+
+                mesh.visible = visible;
+            });
+
+            // Update vessel visibility
+            vesselMeshes.forEach(mesh => {
+                const startType = mesh.userData.start_type;
+                const endType = mesh.userData.end_type;
+                let visible = true;
+
+                // Determine connection type
+                if (startType === 3 || endType === 3) {
+                    visible = showDiving;
+                } else if (startType === 4 || endType === 4) {
+                    visible = showCapillary;
+                } else {
+                    visible = showSurface;
+                }
+
+                mesh.visible = visible;
+            });
+        }
+
+        function fitCameraToScene() {
+            const allMeshes = [...nodeMeshes, ...vesselMeshes];
+            if (allMeshes.length === 0) return;
+
+            const box = new THREE.Box3();
+            allMeshes.forEach(mesh => {
+                if (mesh.visible) {
+                    box.expandByObject(mesh);
+                }
+            });
+
+            if (box.isEmpty()) return;
+
+            const center = box.getCenter(new THREE.Vector3());
+            const size = box.getSize(new THREE.Vector3());
+            const maxDim = Math.max(size.x, size.y, size.z);
+
+            camera.position.set(
+                center.x + maxDim,
+                center.y + maxDim * 0.8,
+                center.z + maxDim
+            );
+            controls.target.copy(center);
+            controls.update();
+        }
+
+        // Event handlers
+        document.getElementById('loadBtn').addEventListener('click', async () => {
+            try {
+                const response = await fetch('vessels_data.json');
+                if (!response.ok) throw new Error('Failed to load vessels_data.json');
+                const data = await response.json();
+                loadVesselData(data);
+            } catch (error) {
+                console.error(error);
+                alert(`Error: ${error.message}\n\nMake sure to run export_vessels.py first.`);
+            }
+        });
+
+        document.getElementById('fileInput').addEventListener('change', async (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+
+            const text = await file.text();
+            const data = JSON.parse(text);
+            loadVesselData(data);
+        });
+
+        // Checkbox handlers
+        document.getElementById('useTubes').addEventListener('change', () => {
+            if (vesselData) loadVesselData(vesselData);
+        });
+        document.getElementById('showNodes').addEventListener('change', () => {
+            if (vesselData) loadVesselData(vesselData);
+        });
+        document.getElementById('showSurface').addEventListener('change', updateVisibility);
+        document.getElementById('showDiving').addEventListener('change', updateVisibility);
+        document.getElementById('showCapillary').addEventListener('change', updateVisibility);
+
+        // Slider handlers
+        document.getElementById('radiusScale').addEventListener('input', (e) => {
+            document.getElementById('radiusScaleVal').textContent = e.target.value;
+            if (vesselData) {
+                updateStats(vesselData);
+                loadVesselData(vesselData);
+            }
+        });
+
+        document.getElementById('tubeSegments').addEventListener('input', (e) => {
+            document.getElementById('tubeSegmentsVal').textContent = e.target.value;
+            if (vesselData) loadVesselData(vesselData);
+        });
+
+        document.getElementById('resetCamera').addEventListener('click', fitCameraToScene);
+
+        // Raycaster for hover
+        const raycaster = new THREE.Raycaster();
+        const mouse = new THREE.Vector2();
+        const tooltip = document.getElementById('tooltip');
+        let hoveredMesh = null;
+
+        container.addEventListener('mousemove', (event) => {
+            mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+            mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+
+            raycaster.setFromCamera(mouse, camera);
+
+            // Check nodes first
+            const nodeIntersects = raycaster.intersectObjects(nodeMeshes);
+
+            // Then check vessels
+            const vesselIntersects = raycaster.intersectObjects(vesselMeshes);
+
+            if (nodeIntersects.length > 0) {
+                const mesh = nodeIntersects[0].object;
+                const nodeData = mesh.userData.nodeData;
+
+                if (hoveredMesh !== mesh) {
+                    if (hoveredMesh) {
+                        hoveredMesh.material.emissive.setHex(0x000000);
+                    }
+                    hoveredMesh = mesh;
+                    mesh.material.emissive.setHex(0x333333);
+                }
+
+                const typeName = typeNames[nodeData.type] || 'Unknown';
+                const pos = nodeData.position;
+
+                tooltip.innerHTML = `
+                    <div class="type-name">${typeName}</div>
+                    <div class="type-info">
+                        ID: ${nodeData.id}<br>
+                        Position: (${pos[0].toFixed(1)}, ${pos[1].toFixed(1)}, ${pos[2].toFixed(1)}) μm<br>
+                        Connections: ${nodeData.connections.length}
+                    </div>
+                `;
+                tooltip.style.display = 'block';
+                tooltip.style.left = (event.clientX + 15) + 'px';
+                tooltip.style.top = (event.clientY + 15) + 'px';
+            } else if (vesselIntersects.length > 0) {
+                const mesh = vesselIntersects[0].object;
+                const data = mesh.userData;
+
+                if (hoveredMesh !== mesh) {
+                    if (hoveredMesh && hoveredMesh.material.emissive) {
+                        hoveredMesh.material.emissive.setHex(0x000000);
+                    }
+                    hoveredMesh = mesh;
+                    if (mesh.material.emissive) {
+                        mesh.material.emissive.setHex(0x222222);
+                    }
+                }
+
+                let vesselType = 'Surface Vessel';
+                if (data.start_type === 3 || data.end_type === 3) {
+                    vesselType = 'Diving Vessel';
+                } else if (data.start_type === 4 || data.end_type === 4) {
+                    vesselType = 'Capillary';
+                }
+
+                tooltip.innerHTML = `
+                    <div class="type-name">${vesselType}</div>
+                    <div class="type-info">
+                        Radius: ${data.radius.toFixed(1)} μm<br>
+                        Diameter: ${(data.radius * 2).toFixed(1)} μm
+                    </div>
+                `;
+                tooltip.style.display = 'block';
+                tooltip.style.left = (event.clientX + 15) + 'px';
+                tooltip.style.top = (event.clientY + 15) + 'px';
+            } else {
+                if (hoveredMesh) {
+                    if (hoveredMesh.material.emissive) {
+                        hoveredMesh.material.emissive.setHex(0x000000);
+                    }
+                    hoveredMesh = null;
+                }
+                tooltip.style.display = 'none';
+            }
+        });
+
+        container.addEventListener('mouseleave', () => {
+            if (hoveredMesh) {
+                if (hoveredMesh.material.emissive) {
+                    hoveredMesh.material.emissive.setHex(0x000000);
+                }
+                hoveredMesh = null;
+            }
+            tooltip.style.display = 'none';
+        });
+
+        // Window resize
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        // Animation loop
+        function animate() {
+            requestAnimationFrame(animate);
+            controls.update();
+            renderer.render(scene, camera);
+        }
+        animate();
+
+        // Try to load default data
+        fetch('vessels_data.json')
+            .then(r => r.json())
+            .then(data => loadVesselData(data))
+            .catch(() => console.log('No default vessel data, use controls to load'));
+    </script>
+</body>
+</html>

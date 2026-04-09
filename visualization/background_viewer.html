@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Step 7: Background Dendrites &amp; Axons Viewer</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #1a1a2e; color: #eee; font-family: 'Segoe UI', sans-serif; overflow: hidden; }
+  #canvas { display: block; }
+  #ui {
+    position: absolute; top: 10px; left: 10px; width: 280px;
+    background: rgba(20,20,40,0.92); border-radius: 10px;
+    padding: 14px; max-height: 95vh; overflow-y: auto;
+  }
+  #ui h2 { font-size: 15px; margin-bottom: 8px; color: #8be9fd; }
+  #ui h3 { font-size: 12px; margin: 10px 0 4px; color: #ff79c6; }
+  .row { display: flex; align-items: center; margin: 3px 0; font-size: 12px; }
+  .row label { flex: 1; }
+  .row input[type=range] { width: 80px; }
+  .row input[type=checkbox] { margin-right: 6px; }
+  .color-dot { width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; display: inline-block; }
+  .stat { font-size: 11px; color: #aaa; margin: 2px 0; }
+  #legend { position: absolute; bottom: 10px; left: 10px; background: rgba(20,20,40,0.9);
+    border-radius: 8px; padding: 10px; font-size: 12px; }
+  #legend .item { display: flex; align-items: center; margin: 3px 0; }
+  #info { position: absolute; top: 10px; right: 10px; background: rgba(20,20,40,0.9);
+    border-radius: 8px; padding: 10px; font-size: 12px; width: 200px; }
+  .sep { border-top: 1px solid #333; margin: 8px 0; }
+</style>
+</head>
+<body>
+<canvas id="canvas"></canvas>
+<div id="ui">
+  <h2>Step 7: Background &amp; Axons</h2>
+  <div class="stat" id="stat-grid"></div>
+  <div class="stat" id="stat-neurons"></div>
+  <div class="stat" id="stat-bg"></div>
+  <div class="stat" id="stat-axons"></div>
+  <div class="sep"></div>
+
+  <h3>Layer Visibility</h3>
+  <div class="row"><input type="checkbox" id="chk-neurons" checked><span class="color-dot" style="background:#50fa7b"></span><label>Neurons (soma+dend)</label></div>
+  <div class="row"><input type="checkbox" id="chk-bg" checked><span class="color-dot" style="background:#ff79c6"></span><label>Bg Dendrites</label></div>
+  <div class="row"><input type="checkbox" id="chk-axons" checked><span class="color-dot" style="background:#ffb86c"></span><label>Axons</label></div>
+
+  <h3>Display</h3>
+  <div class="row"><label>Point Size</label><input type="range" id="sl-size" min="1" max="8" step="0.5" value="2.5"></div>
+  <div class="row"><label>Opacity</label><input type="range" id="sl-opacity" min="0.1" max="1" step="0.05" value="0.7"></div>
+  <div class="row"><label>Bg Dendrite #</label><input type="range" id="sl-bg-id" min="0" max="1" step="1" value="0"><span id="bg-id-val" style="margin-left:4px; min-width:30px">All</span></div>
+  <div class="row"><label>Axon #</label><input type="range" id="sl-axon-id" min="0" max="1" step="1" value="0"><span id="axon-id-val" style="margin-left:4px; min-width:30px">All</span></div>
+</div>
+
+<div id="legend">
+  <div class="item"><span class="color-dot" style="background:#50fa7b"></span> Neurons (soma + dendrites)</div>
+  <div class="item"><span class="color-dot" style="background:#ff79c6"></span> Background dendrites (neuropil)</div>
+  <div class="item"><span class="color-dot" style="background:#ffb86c"></span> Axons</div>
+</div>
+
+<div id="info">
+  <b>Controls</b><br>
+  Drag: Rotate<br>
+  Scroll: Zoom<br>
+  Right-drag: Pan<br>
+  <div class="sep"></div>
+  <div id="info-hover"></div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+<script>
+const canvas = document.getElementById('canvas');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setPixelRatio(window.devicePixelRatio);
+renderer.setClearColor(0x1a1a2e);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(55, window.innerWidth / window.innerHeight, 0.1, 2000);
+const controls = new THREE.OrbitControls(camera, canvas);
+controls.enableDamping = true;
+controls.dampingFactor = 0.1;
+
+// State
+let data = null;
+const layers = { neurons: null, bg: [], axons: [] };
+
+// Colors
+const COL_SOMA = new THREE.Color(0x50fa7b);
+const COL_DEND = new THREE.Color(0x3aad5c);
+const COL_BG   = new THREE.Color(0xff79c6);
+const COL_AXON = new THREE.Color(0xffb86c);
+const COL_VES  = new THREE.Color(0xff5555);
+
+function makePoints(positions, colors, size, opacity) {
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geo.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+  const mat = new THREE.PointsMaterial({
+    size, vertexColors: true, transparent: true, opacity,
+    sizeAttenuation: true, depthWrite: false,
+  });
+  return new THREE.Points(geo, mat);
+}
+
+function buildScene() {
+  if (!data) return;
+  // Clear
+  while (scene.children.length > 0) scene.remove(scene.children[0]);
+  layers.bg = [];
+  layers.axons = [];
+
+  const gs = data.grid_shape;
+  const cx = gs[0] / 2, cy = gs[1] / 2, cz = gs[2] / 2;
+  const size = parseFloat(document.getElementById('sl-size').value);
+  const opacity = parseFloat(document.getElementById('sl-opacity').value);
+
+  // Wireframe bounding box
+  const boxGeo = new THREE.BoxGeometry(gs[0], gs[1], gs[2]);
+  const boxEdge = new THREE.EdgesGeometry(boxGeo);
+  const boxLine = new THREE.LineSegments(boxEdge, new THREE.LineBasicMaterial({ color: 0x444466 }));
+  scene.add(boxLine);
+
+  // Neurons
+  {
+    const pos = [], col = [];
+    for (const n of data.neurons) {
+      // Soma
+      for (let i = 0; i < n.soma_positions.length; i += 3) {
+        pos.push(n.soma_positions[i] - cx, n.soma_positions[i+1] - cy, n.soma_positions[i+2] - cz);
+        const f = n.soma_fluorescence[i / 3] || 1;
+        col.push(COL_SOMA.r * f, COL_SOMA.g * f, COL_SOMA.b * f);
+      }
+      // Dendrites
+      for (let i = 0; i < n.dend_positions.length; i += 3) {
+        pos.push(n.dend_positions[i] - cx, n.dend_positions[i+1] - cy, n.dend_positions[i+2] - cz);
+        const f = n.dend_fluorescence[i / 3] || 1;
+        col.push(COL_DEND.r * f, COL_DEND.g * f, COL_DEND.b * f);
+      }
+    }
+    if (pos.length > 0) {
+      layers.neurons = makePoints(pos, col, size, opacity);
+      scene.add(layers.neurons);
+    }
+  }
+
+  // Background dendrites (each as separate object for individual toggling)
+  const bgColors = [0xff79c6, 0xbd93f9, 0x8be9fd, 0xf1fa8c, 0xff5555, 0x50fa7b, 0xffb86c, 0x6272a4];
+  for (let k = 0; k < data.bg_dendrites.length; k++) {
+    const bg = data.bg_dendrites[k];
+    const c = new THREE.Color(bgColors[k % bgColors.length]);
+    const pos = [], col = [];
+    for (let i = 0; i < bg.positions.length; i += 3) {
+      pos.push(bg.positions[i] - cx, bg.positions[i+1] - cy, bg.positions[i+2] - cz);
+      const f = bg.fluorescence[i / 3] || 1;
+      col.push(c.r * f, c.g * f, c.b * f);
+    }
+    if (pos.length > 0) {
+      const pts = makePoints(pos, col, size * 0.8, opacity);
+      pts.userData = { type: 'bg', id: bg.id, total: bg.total_voxels };
+      layers.bg.push(pts);
+      scene.add(pts);
+    }
+  }
+
+  // Axons (each as separate object)
+  const axonColors = [0xffb86c, 0xf8f8f2, 0x8be9fd, 0xf1fa8c, 0xff79c6, 0x50fa7b, 0xbd93f9, 0xff5555];
+  for (let k = 0; k < data.axons.length; k++) {
+    const ax = data.axons[k];
+    const c = new THREE.Color(axonColors[k % axonColors.length]);
+    const pos = [], col = [];
+    for (let i = 0; i < ax.positions.length; i += 3) {
+      pos.push(ax.positions[i] - cx, ax.positions[i+1] - cy, ax.positions[i+2] - cz);
+      const f = ax.fluorescence[i / 3] || 1;
+      col.push(c.r * f, c.g * f, c.b * f);
+    }
+    if (pos.length > 0) {
+      const pts = makePoints(pos, col, size * 0.6, opacity * 0.8);
+      pts.userData = { type: 'axon', id: ax.id, total: ax.total_voxels };
+      layers.axons.push(pts);
+      scene.add(pts);
+    }
+  }
+
+  // Ambient light (for visual reference)
+  scene.add(new THREE.AmbientLight(0xffffff, 0.3));
+}
+
+function updateVisibility() {
+  const showNeurons = document.getElementById('chk-neurons').checked;
+  const showBg = document.getElementById('chk-bg').checked;
+  const showAxons = document.getElementById('chk-axons').checked;
+
+  const bgId = parseInt(document.getElementById('sl-bg-id').value);
+  const axId = parseInt(document.getElementById('sl-axon-id').value);
+
+  if (layers.neurons) layers.neurons.visible = showNeurons;
+  layers.bg.forEach((p, i) => {
+    p.visible = showBg && (bgId === 0 || (i + 1) === bgId);
+  });
+  layers.axons.forEach((p, i) => {
+    p.visible = showAxons && (axId === 0 || (i + 1) === axId);
+  });
+}
+
+function updatePointSize() {
+  const size = parseFloat(document.getElementById('sl-size').value);
+  const opacity = parseFloat(document.getElementById('sl-opacity').value);
+  if (layers.neurons) { layers.neurons.material.size = size; layers.neurons.material.opacity = opacity; }
+  layers.bg.forEach(p => { p.material.size = size * 0.8; p.material.opacity = opacity; });
+  layers.axons.forEach(p => { p.material.size = size * 0.6; p.material.opacity = opacity * 0.8; });
+}
+
+// Load data
+fetch('background_data.json')
+  .then(r => r.json())
+  .then(d => {
+    data = d;
+    const gs = d.grid_shape;
+
+    document.getElementById('stat-grid').textContent = `Grid: ${gs[0]} x ${gs[1]} x ${gs[2]}`;
+    document.getElementById('stat-neurons').textContent =
+      `Neurons: ${d.params.N_neur} (${d.stats.total_neuron_voxels.toLocaleString()} voxels)`;
+    document.getElementById('stat-bg').textContent =
+      `Bg dendrites: ${d.params.N_den2} (${d.stats.total_bg_dendrite_voxels.toLocaleString()} voxels)`;
+    document.getElementById('stat-axons').textContent =
+      `Axons: ${d.params.N_bg_actual} (${d.stats.total_axon_voxels.toLocaleString()} voxels)`;
+
+    // Set sliders
+    const bgSlider = document.getElementById('sl-bg-id');
+    bgSlider.max = d.bg_dendrites.length;
+    bgSlider.value = 0;
+
+    const axSlider = document.getElementById('sl-axon-id');
+    axSlider.max = d.axons.length;
+    axSlider.value = 0;
+
+    // Camera
+    const maxDim = Math.max(gs[0], gs[1], gs[2]);
+    camera.position.set(maxDim * 0.8, maxDim * 0.6, maxDim * 1.2);
+    camera.lookAt(0, 0, 0);
+    controls.target.set(0, 0, 0);
+
+    buildScene();
+  })
+  .catch(err => {
+    document.getElementById('stat-grid').textContent = 'Error loading data: ' + err.message;
+    console.error(err);
+  });
+
+// Events
+['chk-neurons', 'chk-bg', 'chk-axons'].forEach(id => {
+  document.getElementById(id).addEventListener('change', updateVisibility);
+});
+
+document.getElementById('sl-size').addEventListener('input', updatePointSize);
+document.getElementById('sl-opacity').addEventListener('input', updatePointSize);
+
+document.getElementById('sl-bg-id').addEventListener('input', e => {
+  const v = parseInt(e.target.value);
+  document.getElementById('bg-id-val').textContent = v === 0 ? 'All' : `#${v}`;
+  updateVisibility();
+});
+
+document.getElementById('sl-axon-id').addEventListener('input', e => {
+  const v = parseInt(e.target.value);
+  document.getElementById('axon-id-val').textContent = v === 0 ? 'All' : `#${v}`;
+  updateVisibility();
+});
+
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+function animate() {
+  requestAnimationFrame(animate);
+  controls.update();
+  renderer.render(scene, camera);
+}
+animate();
+</script>
+</body>
+</html>

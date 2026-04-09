@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Step 7 Comparison: Python vs MATLAB</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #1a1a2e; color: #eee; font-family: 'Segoe UI', sans-serif; overflow: hidden; }
+  .viewport { position: absolute; top: 0; bottom: 0; }
+  #left-vp  { left: 0; width: 50%; border-right: 2px solid #444; }
+  #right-vp { left: 50%; width: 50%; }
+  canvas { display: block; width: 100%; height: 100%; }
+  .label {
+    position: absolute; top: 8px; left: 50%; transform: translateX(-50%);
+    background: rgba(20,20,40,0.85); padding: 6px 18px; border-radius: 6px;
+    font-size: 16px; font-weight: bold; z-index: 10; pointer-events: none;
+  }
+  .label.python { color: #8be9fd; }
+  .label.matlab { color: #f1fa8c; }
+  #ui {
+    position: absolute; top: 10px; left: 50%; transform: translateX(-50%);
+    background: rgba(20,20,40,0.92); border-radius: 10px;
+    padding: 12px 18px; z-index: 20; display: flex; gap: 20px; align-items: flex-start;
+  }
+  #ui h3 { font-size: 12px; margin-bottom: 6px; color: #ff79c6; }
+  .col { min-width: 120px; }
+  .row { display: flex; align-items: center; margin: 2px 0; font-size: 11px; }
+  .row label { flex: 1; margin-left: 4px; }
+  .row input[type=range] { width: 70px; }
+  .row input[type=checkbox] { margin-right: 4px; }
+  .color-dot { width: 8px; height: 8px; border-radius: 50%; margin-right: 4px; display: inline-block; }
+  .stat { font-size: 10px; color: #aaa; margin: 1px 0; }
+  .stats-box {
+    position: absolute; bottom: 10px; left: 10px; right: 10px;
+    background: rgba(20,20,40,0.9); border-radius: 8px;
+    padding: 8px 12px; font-size: 11px; z-index: 10;
+  }
+  .stats-box table { width: 100%; border-collapse: collapse; }
+  .stats-box th { text-align: left; color: #8be9fd; padding: 2px 8px; font-size: 10px; }
+  .stats-box td { padding: 2px 8px; font-size: 11px; }
+  .stats-box .py { color: #8be9fd; }
+  .stats-box .ml { color: #f1fa8c; }
+</style>
+</head>
+<body>
+
+<div id="left-vp" class="viewport">
+  <canvas id="canvas-py"></canvas>
+  <div class="label python">Python (calcia)</div>
+</div>
+<div id="right-vp" class="viewport">
+  <canvas id="canvas-ml"></canvas>
+  <div class="label matlab">MATLAB (NAOMi)</div>
+</div>
+
+<div id="ui">
+  <div class="col">
+    <h3>Layers</h3>
+    <div class="row"><input type="checkbox" id="chk-neurons" checked><span class="color-dot" style="background:#50fa7b"></span><label>Neurons</label></div>
+    <div class="row"><input type="checkbox" id="chk-bg" checked><span class="color-dot" style="background:#ff79c6"></span><label>Bg Dendrites</label></div>
+    <div class="row"><input type="checkbox" id="chk-axons" checked><span class="color-dot" style="background:#ffb86c"></span><label>Axons</label></div>
+  </div>
+  <div class="col">
+    <h3>Display</h3>
+    <div class="row"><label>Size</label><input type="range" id="sl-size" min="1" max="8" step="0.5" value="2.5"></div>
+    <div class="row"><label>Opacity</label><input type="range" id="sl-opacity" min="0.1" max="1" step="0.05" value="0.7"></div>
+  </div>
+  <div class="col">
+    <h3>Sync</h3>
+    <div class="row"><input type="checkbox" id="chk-sync" checked><label>Sync cameras</label></div>
+  </div>
+</div>
+
+<div class="stats-box">
+  <table>
+    <tr>
+      <th></th><th>Grid</th><th>Neurons</th><th>Bg Dendrites</th><th>Bg Voxels</th><th>Axons</th><th>Axon Voxels</th><th>Empty</th>
+    </tr>
+    <tr class="py">
+      <td><b>Python</b></td><td id="py-grid">-</td><td id="py-neur">-</td><td id="py-bgn">-</td><td id="py-bgv">-</td><td id="py-axn">-</td><td id="py-axv">-</td><td id="py-empty">-</td>
+    </tr>
+    <tr class="ml">
+      <td><b>MATLAB</b></td><td id="ml-grid">-</td><td id="ml-neur">-</td><td id="ml-bgn">-</td><td id="ml-bgv">-</td><td id="ml-axn">-</td><td id="ml-axv">-</td><td id="ml-empty">-</td>
+    </tr>
+  </table>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+<script>
+// --- Two viewports ---
+function createViewport(canvasId) {
+  const canvas = document.getElementById(canvasId);
+  const rect = canvas.parentElement.getBoundingClientRect();
+  const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+  renderer.setSize(rect.width, rect.height);
+  renderer.setPixelRatio(window.devicePixelRatio);
+  renderer.setClearColor(0x1a1a2e);
+  const scene = new THREE.Scene();
+  const camera = new THREE.PerspectiveCamera(55, rect.width / rect.height, 0.1, 2000);
+  const controls = new THREE.OrbitControls(camera, canvas);
+  controls.enableDamping = true;
+  controls.dampingFactor = 0.1;
+  return { renderer, scene, camera, controls, canvas, layers: { neurons: null, bg: [], axons: [] } };
+}
+
+const vpPy = createViewport('canvas-py');
+const vpMl = createViewport('canvas-ml');
+
+const COL_SOMA = new THREE.Color(0x50fa7b);
+const COL_DEND = new THREE.Color(0x3aad5c);
+const bgColors = [0xff79c6, 0xbd93f9, 0x8be9fd, 0xf1fa8c, 0xff5555, 0x50fa7b, 0xffb86c, 0x6272a4];
+const axonColors = [0xffb86c, 0xf8f8f2, 0x8be9fd, 0xf1fa8c, 0xff79c6, 0x50fa7b, 0xbd93f9, 0xff5555];
+
+function makePoints(positions, colors, size, opacity) {
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geo.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+  const mat = new THREE.PointsMaterial({
+    size, vertexColors: true, transparent: true, opacity,
+    sizeAttenuation: true, depthWrite: false,
+  });
+  return new THREE.Points(geo, mat);
+}
+
+function buildScene(vp, data) {
+  while (vp.scene.children.length > 0) vp.scene.remove(vp.scene.children[0]);
+  vp.layers = { neurons: null, bg: [], axons: [] };
+  if (!data) return;
+
+  const gs = data.grid_shape;
+  const cx = gs[0]/2, cy = gs[1]/2, cz = gs[2]/2;
+  const size = parseFloat(document.getElementById('sl-size').value);
+  const opacity = parseFloat(document.getElementById('sl-opacity').value);
+
+  // Bounding box
+  const boxGeo = new THREE.BoxGeometry(gs[0], gs[1], gs[2]);
+  const boxEdge = new THREE.EdgesGeometry(boxGeo);
+  vp.scene.add(new THREE.LineSegments(boxEdge, new THREE.LineBasicMaterial({ color: 0x444466 })));
+
+  // Neurons
+  {
+    const pos = [], col = [];
+    for (const n of data.neurons) {
+      for (let i = 0; i < n.soma_positions.length; i += 3) {
+        pos.push(n.soma_positions[i]-cx, n.soma_positions[i+1]-cy, n.soma_positions[i+2]-cz);
+        const f = n.soma_fluorescence[i/3] || 1;
+        col.push(COL_SOMA.r*f, COL_SOMA.g*f, COL_SOMA.b*f);
+      }
+      for (let i = 0; i < n.dend_positions.length; i += 3) {
+        pos.push(n.dend_positions[i]-cx, n.dend_positions[i+1]-cy, n.dend_positions[i+2]-cz);
+        const f = n.dend_fluorescence[i/3] || 1;
+        col.push(COL_DEND.r*f, COL_DEND.g*f, COL_DEND.b*f);
+      }
+    }
+    if (pos.length > 0) {
+      vp.layers.neurons = makePoints(pos, col, size, opacity);
+      vp.scene.add(vp.layers.neurons);
+    }
+  }
+
+  // Background dendrites
+  for (let k = 0; k < data.bg_dendrites.length; k++) {
+    const bg = data.bg_dendrites[k];
+    const c = new THREE.Color(bgColors[k % bgColors.length]);
+    const pos = [], col = [];
+    for (let i = 0; i < bg.positions.length; i += 3) {
+      pos.push(bg.positions[i]-cx, bg.positions[i+1]-cy, bg.positions[i+2]-cz);
+      const f = bg.fluorescence[i/3] || 1;
+      col.push(c.r*f, c.g*f, c.b*f);
+    }
+    if (pos.length > 0) {
+      const pts = makePoints(pos, col, size*0.8, opacity);
+      vp.layers.bg.push(pts);
+      vp.scene.add(pts);
+    }
+  }
+
+  // Axons
+  for (let k = 0; k < data.axons.length; k++) {
+    const ax = data.axons[k];
+    const c = new THREE.Color(axonColors[k % axonColors.length]);
+    const pos = [], col = [];
+    for (let i = 0; i < ax.positions.length; i += 3) {
+      pos.push(ax.positions[i]-cx, ax.positions[i+1]-cy, ax.positions[i+2]-cz);
+      const f = ax.fluorescence[i/3] || 1;
+      col.push(c.r*f, c.g*f, c.b*f);
+    }
+    if (pos.length > 0) {
+      const pts = makePoints(pos, col, size*0.6, opacity*0.8);
+      vp.layers.axons.push(pts);
+      vp.scene.add(pts);
+    }
+  }
+
+  vp.scene.add(new THREE.AmbientLight(0xffffff, 0.3));
+}
+
+function updateVisibility() {
+  const showN = document.getElementById('chk-neurons').checked;
+  const showB = document.getElementById('chk-bg').checked;
+  const showA = document.getElementById('chk-axons').checked;
+  [vpPy, vpMl].forEach(vp => {
+    if (vp.layers.neurons) vp.layers.neurons.visible = showN;
+    vp.layers.bg.forEach(p => p.visible = showB);
+    vp.layers.axons.forEach(p => p.visible = showA);
+  });
+}
+
+function updatePointSize() {
+  const size = parseFloat(document.getElementById('sl-size').value);
+  const opacity = parseFloat(document.getElementById('sl-opacity').value);
+  [vpPy, vpMl].forEach(vp => {
+    if (vp.layers.neurons) { vp.layers.neurons.material.size = size; vp.layers.neurons.material.opacity = opacity; }
+    vp.layers.bg.forEach(p => { p.material.size = size*0.8; p.material.opacity = opacity; });
+    vp.layers.axons.forEach(p => { p.material.size = size*0.6; p.material.opacity = opacity*0.8; });
+  });
+}
+
+function fillStats(prefix, d) {
+  if (!d) return;
+  const gs = d.grid_shape;
+  document.getElementById(prefix+'-grid').textContent = `${gs[0]}x${gs[1]}x${gs[2]}`;
+  document.getElementById(prefix+'-neur').textContent = d.params.N_neur;
+  document.getElementById(prefix+'-bgn').textContent = d.params.N_den2;
+  document.getElementById(prefix+'-bgv').textContent = d.stats.total_bg_dendrite_voxels.toLocaleString();
+  document.getElementById(prefix+'-axn').textContent = d.params.N_bg_actual;
+  document.getElementById(prefix+'-axv').textContent = d.stats.total_axon_voxels.toLocaleString();
+  document.getElementById(prefix+'-empty').textContent = d.stats.total_empty_voxels.toLocaleString();
+}
+
+// Load both datasets
+let dataPy = null, dataMl = null;
+Promise.all([
+  fetch('background_data.json').then(r => r.json()),
+  fetch('background_matlab.json').then(r => r.json()),
+]).then(([py, ml]) => {
+  dataPy = py;
+  dataMl = ml;
+
+  fillStats('py', py);
+  fillStats('ml', ml);
+
+  // Camera setup
+  const gs = py.grid_shape;
+  const maxDim = Math.max(gs[0], gs[1], gs[2]);
+  [vpPy, vpMl].forEach(vp => {
+    vp.camera.position.set(maxDim*0.8, maxDim*0.6, maxDim*1.2);
+    vp.camera.lookAt(0, 0, 0);
+    vp.controls.target.set(0, 0, 0);
+  });
+
+  buildScene(vpPy, py);
+  buildScene(vpMl, ml);
+}).catch(err => {
+  console.error('Load error:', err);
+  document.getElementById('py-grid').textContent = 'Error: ' + err.message;
+});
+
+// Sync cameras
+let syncing = false;
+function syncCamera(src, dst) {
+  if (syncing || !document.getElementById('chk-sync').checked) return;
+  syncing = true;
+  dst.camera.position.copy(src.camera.position);
+  dst.camera.quaternion.copy(src.camera.quaternion);
+  dst.controls.target.copy(src.controls.target);
+  dst.controls.update();
+  syncing = false;
+}
+
+vpPy.controls.addEventListener('change', () => syncCamera(vpPy, vpMl));
+vpMl.controls.addEventListener('change', () => syncCamera(vpMl, vpPy));
+
+// Events
+['chk-neurons', 'chk-bg', 'chk-axons'].forEach(id =>
+  document.getElementById(id).addEventListener('change', updateVisibility));
+document.getElementById('sl-size').addEventListener('input', updatePointSize);
+document.getElementById('sl-opacity').addEventListener('input', updatePointSize);
+
+// Resize
+function onResize() {
+  [vpPy, vpMl].forEach(vp => {
+    const rect = vp.canvas.parentElement.getBoundingClientRect();
+    vp.renderer.setSize(rect.width, rect.height);
+    vp.camera.aspect = rect.width / rect.height;
+    vp.camera.updateProjectionMatrix();
+  });
+}
+window.addEventListener('resize', onResize);
+
+// Animate
+function animate() {
+  requestAnimationFrame(animate);
+  vpPy.controls.update();
+  vpMl.controls.update();
+  vpPy.renderer.render(vpPy.scene, vpPy.camera);
+  vpMl.renderer.render(vpMl.scene, vpMl.camera);
+}
+animate();
+</script>
+</body>
+</html>

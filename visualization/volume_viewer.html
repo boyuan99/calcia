@@ -1,0 +1,633 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Calcia - Volume Simulation Viewer</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #1a1a2e;
+            color: #eee;
+            overflow: hidden;
+        }
+        #container { width: 100vw; height: 100vh; }
+        #controls {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            background: rgba(0, 0, 0, 0.8);
+            padding: 20px;
+            border-radius: 10px;
+            min-width: 280px;
+            max-height: 90vh;
+            overflow-y: auto;
+        }
+        h1 { font-size: 1.4rem; margin-bottom: 10px; color: #4ecdc4; }
+        h2 { font-size: 1rem; margin: 15px 0 10px; color: #74b9ff; border-bottom: 1px solid #333; padding-bottom: 5px; }
+        .control-group { margin-bottom: 12px; }
+        label { display: block; margin-bottom: 5px; font-size: 0.85rem; color: #aaa; }
+        select, button, input[type="file"] {
+            width: 100%;
+            padding: 8px 12px;
+            border: none;
+            border-radius: 5px;
+            background: #2d2d44;
+            color: #fff;
+            font-size: 0.9rem;
+            cursor: pointer;
+        }
+        select:hover, button:hover { background: #3d3d54; }
+        button { background: #4ecdc4; color: #1a1a2e; font-weight: bold; margin-top: 5px; }
+        button:hover { background: #45b7aa; }
+        .checkbox-group { display: flex; align-items: center; gap: 10px; }
+        .checkbox-group input { width: auto; }
+        input[type="range"] { width: 100%; margin-top: 5px; }
+        #info {
+            position: absolute;
+            bottom: 20px;
+            left: 20px;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 15px;
+            border-radius: 10px;
+            font-size: 0.85rem;
+            color: #aaa;
+        }
+        #stats {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 15px;
+            border-radius: 10px;
+            font-size: 0.85rem;
+            color: #aaa;
+            min-width: 200px;
+        }
+        #stats h3 { color: #4ecdc4; margin-bottom: 10px; }
+        #stats .stat { margin: 5px 0; }
+        #stats .stat-label { color: #888; }
+        #stats .stat-value { color: #fff; float: right; }
+        #loading {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            font-size: 1.5rem;
+            color: #4ecdc4;
+        }
+        .hidden { display: none !important; }
+        #tooltip {
+            position: absolute;
+            background: rgba(0, 0, 0, 0.9);
+            color: #fff;
+            padding: 10px 15px;
+            border-radius: 8px;
+            font-size: 0.9rem;
+            pointer-events: none;
+            z-index: 1000;
+            display: none;
+            border: 1px solid #4ecdc4;
+            max-width: 280px;
+        }
+        #tooltip .title { color: #4ecdc4; font-weight: bold; font-size: 1rem; margin-bottom: 5px; }
+        #tooltip .info { color: #aaa; font-size: 0.8rem; line-height: 1.4; }
+        .color-indicator {
+            display: inline-block;
+            width: 12px;
+            height: 12px;
+            border-radius: 3px;
+            margin-right: 8px;
+            vertical-align: middle;
+        }
+    </style>
+</head>
+<body>
+    <div id="container"></div>
+
+    <div id="controls">
+        <h1>Volume Viewer</h1>
+
+        <div class="control-group">
+            <label>Load Data</label>
+            <select id="dataSelect">
+                <option value="volume_simulation.json">Volume Simulation (Neurons + Vessels)</option>
+                <option value="neuron_data.json">Single Neuron</option>
+                <option value="neurons_data.json">Multiple Neurons</option>
+                <option value="neuron_types_data.json">Neuron Types</option>
+            </select>
+            <button id="loadBtn">Load</button>
+        </div>
+
+        <div class="control-group">
+            <label>Or upload JSON file</label>
+            <input type="file" id="fileInput" accept=".json">
+        </div>
+
+        <h2>Neurons</h2>
+        <div class="control-group">
+            <label class="checkbox-group">
+                <input type="checkbox" id="showSoma" checked>
+                <span class="color-indicator" style="background: #4ecdc4;"></span>
+                Show Soma
+            </label>
+        </div>
+        <div class="control-group">
+            <label class="checkbox-group">
+                <input type="checkbox" id="showNucleus" checked>
+                <span class="color-indicator" style="background: #2d3436;"></span>
+                Show Nucleus
+            </label>
+        </div>
+        <div class="control-group">
+            <label>Soma Opacity: <span id="somaOpacityVal">0.6</span></label>
+            <input type="range" id="somaOpacity" min="0.1" max="1" step="0.1" value="0.6">
+        </div>
+
+        <h2>Vessels</h2>
+        <div class="control-group">
+            <label class="checkbox-group">
+                <input type="checkbox" id="showVessels" checked>
+                <span class="color-indicator" style="background: #e74c3c;"></span>
+                Show Blood Vessels
+            </label>
+        </div>
+        <div class="control-group">
+            <label>Vessel Radius Scale: <span id="vesselScaleVal">1.0</span></label>
+            <input type="range" id="vesselScale" min="0.5" max="3" step="0.1" value="1.0">
+        </div>
+
+        <h2>Display</h2>
+        <div class="control-group">
+            <label class="checkbox-group">
+                <input type="checkbox" id="showVolumeBounds">
+                Show Volume Bounds
+            </label>
+        </div>
+        <div class="control-group">
+            <label class="checkbox-group">
+                <input type="checkbox" id="wireframe">
+                Wireframe Mode
+            </label>
+        </div>
+        <div class="control-group">
+            <button id="resetCamera">Reset Camera</button>
+        </div>
+    </div>
+
+    <div id="stats" class="hidden">
+        <h3>Simulation Info</h3>
+        <div class="stat"><span class="stat-label">Neurons:</span> <span class="stat-value" id="statNeurons">-</span></div>
+        <div class="stat"><span class="stat-label">Vessel Nodes:</span> <span class="stat-value" id="statVesselNodes">-</span></div>
+        <div class="stat"><span class="stat-label">Vessel Connections:</span> <span class="stat-value" id="statVesselConns">-</span></div>
+        <div class="stat"><span class="stat-label">Volume Size:</span> <span class="stat-value" id="statVolSize">-</span></div>
+        <div class="stat"><span class="stat-label">Min Distance:</span> <span class="stat-value" id="statMinDist">-</span></div>
+    </div>
+
+    <div id="info">
+        <strong>Controls:</strong><br>
+        Left click + drag: Rotate<br>
+        Right click + drag: Pan<br>
+        Scroll: Zoom<br>
+        Hover: Show info
+    </div>
+
+    <div id="loading">Loading Three.js...</div>
+    <div id="tooltip"></div>
+
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+            "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+        }
+    }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+        document.getElementById('loading').classList.add('hidden');
+
+        // Scene setup
+        const container = document.getElementById('container');
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x1a1a2e);
+
+        const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 2000);
+        camera.position.set(100, 100, 100);
+
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(window.devicePixelRatio);
+        container.appendChild(renderer.domElement);
+
+        const controls = new OrbitControls(camera, renderer.domElement);
+        controls.enableDamping = true;
+        controls.dampingFactor = 0.05;
+
+        // Lighting
+        scene.add(new THREE.AmbientLight(0x404040, 0.6));
+        const dirLight1 = new THREE.DirectionalLight(0xffffff, 1);
+        dirLight1.position.set(100, 100, 100);
+        scene.add(dirLight1);
+        const dirLight2 = new THREE.DirectionalLight(0xffffff, 0.4);
+        dirLight2.position.set(-100, -100, -100);
+        scene.add(dirLight2);
+
+        // Grid and axes
+        const gridHelper = new THREE.GridHelper(200, 20, 0x444444, 0x333333);
+        scene.add(gridHelper);
+        const axesHelper = new THREE.AxesHelper(20);
+        scene.add(axesHelper);
+
+        // Store objects
+        let somaMeshes = [];
+        let nucleusMeshes = [];
+        let vesselMeshes = [];
+        let volumeBox = null;
+        let neuronData = [];
+        let currentData = null;
+
+        // Colors
+        const somaColors = [
+            0x4ecdc4, 0x45b7d1, 0x96ceb4, 0x74b9ff, 0xa29bfe,
+            0xfd79a8, 0xffeaa7, 0x55efc4, 0x81ecec, 0xdfe6e9
+        ];
+        const nucleusColor = 0x2d3436;
+        const vesselColor = 0xe74c3c;
+
+        // Raycaster
+        const raycaster = new THREE.Raycaster();
+        const mouse = new THREE.Vector2();
+        const tooltip = document.getElementById('tooltip');
+
+        function clearScene() {
+            somaMeshes.forEach(m => scene.remove(m));
+            nucleusMeshes.forEach(m => scene.remove(m));
+            vesselMeshes.forEach(m => scene.remove(m));
+            if (volumeBox) scene.remove(volumeBox);
+            somaMeshes = [];
+            nucleusMeshes = [];
+            vesselMeshes = [];
+            volumeBox = null;
+            neuronData = [];
+        }
+
+        function createMeshFromVerticesFaces(vertices, faces, color, opacity) {
+            const geometry = new THREE.BufferGeometry();
+            const positions = new Float32Array(vertices.flat());
+            geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+            const indices = new Uint32Array(faces.flat());
+            geometry.setIndex(new THREE.BufferAttribute(indices, 1));
+            geometry.computeVertexNormals();
+
+            const material = new THREE.MeshPhongMaterial({
+                color: color,
+                transparent: true,
+                opacity: opacity,
+                side: THREE.DoubleSide,
+                wireframe: document.getElementById('wireframe').checked,
+            });
+            return new THREE.Mesh(geometry, material);
+        }
+
+        function createVesselTube(points, radius) {
+            if (points.length < 2) return null;
+
+            const curve = new THREE.CatmullRomCurve3(
+                points.map(p => new THREE.Vector3(p[0], p[2], p[1])) // Swap Y and Z for Three.js
+            );
+
+            const tubeGeometry = new THREE.TubeGeometry(curve, points.length * 2, radius, 8, false);
+            const material = new THREE.MeshPhongMaterial({
+                color: vesselColor,
+                transparent: true,
+                opacity: 0.9,
+            });
+            return new THREE.Mesh(tubeGeometry, material);
+        }
+
+        function loadUnifiedFormat(data) {
+            clearScene();
+            currentData = data;
+
+            const components = data.components;
+            const params = data.parameters || {};
+
+            // Load neurons
+            if (components.neurons && components.neurons.items) {
+                const sharedFaces = components.neurons.shared_triangulation?.faces;
+
+                components.neurons.items.forEach((neuron, i) => {
+                    neuronData.push({
+                        id: neuron.id,
+                        type: neuron.type,
+                        position: neuron.position,
+                        stats: neuron.statistics
+                    });
+
+                    const somaFaces = neuron.soma.faces_ref === 'shared' ? sharedFaces : neuron.soma.faces;
+                    const nucFaces = neuron.nucleus.faces_ref === 'shared' ? sharedFaces : neuron.nucleus.faces;
+
+                    // Swap Y and Z for Three.js coordinate system
+                    const somaVerts = neuron.soma.vertices.map(v => [v[0], v[2], v[1]]);
+                    const nucVerts = neuron.nucleus.vertices.map(v => [v[0], v[2], v[1]]);
+
+                    const somaColor = somaColors[i % somaColors.length];
+                    const somaOpacity = parseFloat(document.getElementById('somaOpacity').value);
+                    const somaMesh = createMeshFromVerticesFaces(somaVerts, somaFaces, somaColor, somaOpacity);
+                    somaMesh.visible = document.getElementById('showSoma').checked;
+                    somaMesh.userData = { type: 'neuron', index: i };
+                    scene.add(somaMesh);
+                    somaMeshes.push(somaMesh);
+
+                    const nucOpacity = 0.9;
+                    const nucMesh = createMeshFromVerticesFaces(nucVerts, nucFaces, nucleusColor, nucOpacity);
+                    nucMesh.visible = document.getElementById('showNucleus').checked;
+                    nucMesh.userData = { type: 'nucleus', index: i };
+                    scene.add(nucMesh);
+                    nucleusMeshes.push(nucMesh);
+                });
+            }
+
+            // Load vessels
+            if (components.vessels && components.vessels.connections) {
+                const vesselScale = parseFloat(document.getElementById('vesselScale').value);
+
+                components.vessels.connections.forEach((conn, i) => {
+                    if (conn.path && conn.path.length >= 2) {
+                        const radius = (conn.radius || 2) * vesselScale;
+                        const tube = createVesselTube(conn.path, radius);
+                        if (tube) {
+                            tube.visible = document.getElementById('showVessels').checked;
+                            tube.userData = { type: 'vessel', index: i, radius: conn.radius };
+                            scene.add(tube);
+                            vesselMeshes.push(tube);
+                        }
+                    }
+                });
+            }
+
+            // Create volume bounding box
+            if (params.volume && params.volume.vol_sz) {
+                const sz = params.volume.vol_sz;
+                const boxGeom = new THREE.BoxGeometry(sz[0], sz[2], sz[1]); // Swap Y and Z
+                const boxMat = new THREE.MeshBasicMaterial({
+                    color: 0x4ecdc4,
+                    wireframe: true,
+                    transparent: true,
+                    opacity: 0.3
+                });
+                volumeBox = new THREE.Mesh(boxGeom, boxMat);
+                volumeBox.position.set(sz[0]/2, sz[2]/2, sz[1]/2);
+                volumeBox.visible = document.getElementById('showVolumeBounds').checked;
+                scene.add(volumeBox);
+            }
+
+            // Update stats panel
+            updateStats(data);
+            fitCameraToScene();
+        }
+
+        function loadLegacyNeuronFormat(data) {
+            // Support old neuron-only format
+            clearScene();
+            currentData = data;
+
+            if (data.neurons) {
+                data.neurons.forEach((neuron, i) => {
+                    neuronData.push({
+                        id: i,
+                        type: neuron.type || 'unknown',
+                        name: neuron.name
+                    });
+
+                    const somaVerts = neuron.soma.vertices.map(v => [v[0], v[2], v[1]]);
+                    const somaFaces = neuron.soma.faces;
+                    const nucVerts = neuron.nucleus.vertices.map(v => [v[0], v[2], v[1]]);
+                    const nucFaces = neuron.nucleus.faces;
+
+                    const somaColor = somaColors[i % somaColors.length];
+                    const somaOpacity = parseFloat(document.getElementById('somaOpacity').value);
+                    const somaMesh = createMeshFromVerticesFaces(somaVerts, somaFaces, somaColor, somaOpacity);
+                    somaMesh.visible = document.getElementById('showSoma').checked;
+                    somaMesh.userData = { type: 'neuron', index: i };
+                    scene.add(somaMesh);
+                    somaMeshes.push(somaMesh);
+
+                    const nucMesh = createMeshFromVerticesFaces(nucVerts, nucFaces, nucleusColor, 0.9);
+                    nucMesh.visible = document.getElementById('showNucleus').checked;
+                    scene.add(nucMesh);
+                    nucleusMeshes.push(nucMesh);
+                });
+            }
+
+            document.getElementById('stats').classList.add('hidden');
+            fitCameraToScene();
+        }
+
+        function loadData(data) {
+            if (data.format_version && data.components) {
+                loadUnifiedFormat(data);
+            } else if (data.neurons) {
+                loadLegacyNeuronFormat(data);
+            } else {
+                alert('Unknown data format');
+            }
+        }
+
+        function updateStats(data) {
+            const stats = document.getElementById('stats');
+            stats.classList.remove('hidden');
+
+            const neurons = data.components?.neurons;
+            const vessels = data.components?.vessels;
+            const volParams = data.parameters?.volume;
+
+            document.getElementById('statNeurons').textContent = neurons?.count || 0;
+            document.getElementById('statVesselNodes').textContent = vessels?.count_nodes || 0;
+            document.getElementById('statVesselConns').textContent = vessels?.count_connections || 0;
+
+            if (volParams?.vol_sz) {
+                const sz = volParams.vol_sz;
+                document.getElementById('statVolSize').textContent = `${sz[0]}x${sz[1]}x${sz[2]} um`;
+            } else {
+                document.getElementById('statVolSize').textContent = '-';
+            }
+
+            document.getElementById('statMinDist').textContent = volParams?.min_dist ? `${volParams.min_dist} um` : '-';
+        }
+
+        function fitCameraToScene() {
+            const box = new THREE.Box3();
+            somaMeshes.forEach(m => box.expandByObject(m));
+            vesselMeshes.forEach(m => box.expandByObject(m));
+
+            if (box.isEmpty()) {
+                camera.position.set(100, 100, 100);
+                controls.target.set(50, 25, 50);
+            } else {
+                const center = box.getCenter(new THREE.Vector3());
+                const size = box.getSize(new THREE.Vector3());
+                const maxDim = Math.max(size.x, size.y, size.z);
+
+                camera.position.set(center.x + maxDim, center.y + maxDim * 0.8, center.z + maxDim);
+                controls.target.copy(center);
+            }
+            controls.update();
+        }
+
+        // Event handlers
+        document.getElementById('loadBtn').addEventListener('click', async () => {
+            const filename = document.getElementById('dataSelect').value;
+            try {
+                const response = await fetch(filename);
+                if (!response.ok) throw new Error(`Failed to load ${filename}`);
+                const data = await response.json();
+                loadData(data);
+            } catch (error) {
+                console.error(error);
+                alert(`Error: ${error.message}`);
+            }
+        });
+
+        document.getElementById('fileInput').addEventListener('change', async (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+            const text = await file.text();
+            const data = JSON.parse(text);
+            loadData(data);
+        });
+
+        document.getElementById('showSoma').addEventListener('change', (e) => {
+            somaMeshes.forEach(m => m.visible = e.target.checked);
+        });
+
+        document.getElementById('showNucleus').addEventListener('change', (e) => {
+            nucleusMeshes.forEach(m => m.visible = e.target.checked);
+        });
+
+        document.getElementById('showVessels').addEventListener('change', (e) => {
+            vesselMeshes.forEach(m => m.visible = e.target.checked);
+        });
+
+        document.getElementById('showVolumeBounds').addEventListener('change', (e) => {
+            if (volumeBox) volumeBox.visible = e.target.checked;
+        });
+
+        document.getElementById('wireframe').addEventListener('change', (e) => {
+            [...somaMeshes, ...nucleusMeshes].forEach(m => m.material.wireframe = e.target.checked);
+        });
+
+        document.getElementById('somaOpacity').addEventListener('input', (e) => {
+            document.getElementById('somaOpacityVal').textContent = e.target.value;
+            somaMeshes.forEach(m => m.material.opacity = parseFloat(e.target.value));
+        });
+
+        document.getElementById('vesselScale').addEventListener('input', (e) => {
+            document.getElementById('vesselScaleVal').textContent = e.target.value;
+            // Reload vessels with new scale
+            if (currentData && currentData.components?.vessels) {
+                vesselMeshes.forEach(m => scene.remove(m));
+                vesselMeshes = [];
+                const vesselScale = parseFloat(e.target.value);
+                currentData.components.vessels.connections.forEach((conn, i) => {
+                    if (conn.path && conn.path.length >= 2) {
+                        const radius = (conn.radius || 2) * vesselScale;
+                        const tube = createVesselTube(conn.path, radius);
+                        if (tube) {
+                            tube.visible = document.getElementById('showVessels').checked;
+                            tube.userData = { type: 'vessel', index: i };
+                            scene.add(tube);
+                            vesselMeshes.push(tube);
+                        }
+                    }
+                });
+            }
+        });
+
+        document.getElementById('resetCamera').addEventListener('click', fitCameraToScene);
+
+        // Hover detection
+        let hoveredMesh = null;
+        container.addEventListener('mousemove', (event) => {
+            mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+            mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+
+            raycaster.setFromCamera(mouse, camera);
+            const allMeshes = [...somaMeshes, ...vesselMeshes];
+            const intersects = raycaster.intersectObjects(allMeshes);
+
+            if (intersects.length > 0) {
+                const mesh = intersects[0].object;
+                const userData = mesh.userData;
+
+                if (hoveredMesh !== mesh) {
+                    if (hoveredMesh) hoveredMesh.material.emissive?.setHex(0x000000);
+                    hoveredMesh = mesh;
+                    if (mesh.material.emissive) mesh.material.emissive.setHex(0x333333);
+                }
+
+                let html = '';
+                if (userData.type === 'neuron') {
+                    const info = neuronData[userData.index];
+                    html = `<div class="title">Neuron ${info.id}</div>`;
+                    html += `<div class="info">Type: ${info.type}<br>`;
+                    if (info.position) {
+                        html += `Position: (${info.position[0].toFixed(1)}, ${info.position[1].toFixed(1)}, ${info.position[2].toFixed(1)}) um<br>`;
+                    }
+                    if (info.stats) {
+                        if (info.stats.volume) html += `Volume: ${info.stats.volume.toFixed(1)} um³<br>`;
+                        if (info.stats.sphericity) html += `Sphericity: ${info.stats.sphericity.toFixed(3)}`;
+                    }
+                    html += '</div>';
+                } else if (userData.type === 'vessel') {
+                    html = `<div class="title">Blood Vessel ${userData.index}</div>`;
+                    html += `<div class="info">Radius: ${(userData.radius || 2).toFixed(1)} um</div>`;
+                }
+
+                tooltip.innerHTML = html;
+                tooltip.style.display = 'block';
+                tooltip.style.left = (event.clientX + 15) + 'px';
+                tooltip.style.top = (event.clientY + 15) + 'px';
+            } else {
+                if (hoveredMesh) {
+                    hoveredMesh.material.emissive?.setHex(0x000000);
+                    hoveredMesh = null;
+                }
+                tooltip.style.display = 'none';
+            }
+        });
+
+        container.addEventListener('mouseleave', () => {
+            if (hoveredMesh) {
+                hoveredMesh.material.emissive?.setHex(0x000000);
+                hoveredMesh = null;
+            }
+            tooltip.style.display = 'none';
+        });
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        function animate() {
+            requestAnimationFrame(animate);
+            controls.update();
+            renderer.render(scene, camera);
+        }
+        animate();
+
+        // Auto-load default data
+        fetch('volume_simulation.json')
+            .then(r => r.json())
+            .then(data => loadData(data))
+            .catch(() => console.log('No default data, use controls to load'));
+    </script>
+</body>
+</html>

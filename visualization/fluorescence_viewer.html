@@ -1,0 +1,563 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Step 6: Fluorescence Visualization</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { overflow: hidden; background: #1a1a2e; font-family: 'Segoe UI', sans-serif; color: #e0e0e0; }
+  #container { width: 100vw; height: 100vh; }
+
+  #controls {
+    position: absolute; top: 10px; left: 10px;
+    background: rgba(20,20,40,0.92); border-radius: 10px;
+    padding: 14px 16px; width: 280px; max-height: 90vh;
+    overflow-y: auto; z-index: 10; font-size: 13px;
+    border: 1px solid rgba(100,100,255,0.15);
+  }
+  #controls h2 { font-size: 15px; margin-bottom: 8px; color: #8888ff; }
+  #controls h3 { font-size: 13px; margin: 10px 0 4px; color: #aaa; border-top: 1px solid #333; padding-top: 6px; }
+  .ctrl-row { display: flex; align-items: center; gap: 6px; margin: 3px 0; }
+  .ctrl-row label { flex: 1; }
+  .ctrl-row input[type=range] { width: 90px; }
+  .ctrl-row input[type=checkbox] { accent-color: #6666cc; }
+  .color-dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 4px; }
+  .val { color: #888; font-size: 11px; min-width: 28px; text-align: right; }
+  select { background: #2a2a4e; color: #ddd; border: 1px solid #444; border-radius: 4px; padding: 2px 4px; font-size: 12px; }
+  button { background: #3a3a6e; color: #ddd; border: 1px solid #555; border-radius: 4px; padding: 4px 10px; cursor: pointer; font-size: 12px; }
+  button:hover { background: #4a4aae; }
+
+  #stats {
+    position: absolute; top: 10px; right: 10px;
+    background: rgba(20,20,40,0.92); border-radius: 10px;
+    padding: 12px 16px; width: 220px; z-index: 10; font-size: 12px;
+    border: 1px solid rgba(100,100,255,0.15);
+  }
+  #stats h3 { color: #8888ff; margin-bottom: 6px; font-size: 14px; }
+  .stat-row { display: flex; justify-content: space-between; margin: 2px 0; }
+  .stat-val { color: #aaf; font-weight: bold; }
+
+  #colorbar {
+    position: absolute; bottom: 60px; right: 20px;
+    background: rgba(20,20,40,0.9); border-radius: 8px;
+    padding: 10px; z-index: 10; text-align: center; font-size: 11px;
+    border: 1px solid rgba(100,100,255,0.15);
+  }
+  #colorbar canvas { display: block; margin: 4px auto; }
+
+  #info {
+    position: absolute; bottom: 10px; left: 10px;
+    background: rgba(20,20,40,0.85); border-radius: 8px;
+    padding: 8px 12px; font-size: 11px; color: #888; z-index: 10;
+  }
+
+  #loading {
+    position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+    font-size: 18px; color: #8888ff; z-index: 20;
+  }
+</style>
+</head>
+<body>
+
+<div id="loading">Loading... select a JSON file</div>
+<div id="container"></div>
+
+<div id="controls">
+  <h2>Fluorescence Viewer</h2>
+  <div class="ctrl-row">
+    <label>Load JSON:</label>
+    <input type="file" id="fileInput" accept=".json" style="width:140px;font-size:11px;">
+  </div>
+
+  <h3>Colormap</h3>
+  <div class="ctrl-row">
+    <label>Palette:</label>
+    <select id="colormap">
+      <option value="hot" selected>Hot</option>
+      <option value="viridis">Viridis</option>
+      <option value="plasma">Plasma</option>
+      <option value="cool">Cool</option>
+    </select>
+  </div>
+  <div class="ctrl-row">
+    <label>Min:</label>
+    <input type="range" id="cmin" min="0" max="1.5" step="0.01" value="0">
+    <span class="val" id="cminVal">0.00</span>
+  </div>
+  <div class="ctrl-row">
+    <label>Max:</label>
+    <input type="range" id="cmax" min="0.1" max="2.0" step="0.01" value="1.5">
+    <span class="val" id="cmaxVal">1.50</span>
+  </div>
+
+  <h3>Visibility</h3>
+  <div class="ctrl-row">
+    <input type="checkbox" id="showSoma" checked>
+    <span class="color-dot" style="background:#ff6644;"></span>
+    <label for="showSoma">Soma</label>
+  </div>
+  <div class="ctrl-row">
+    <input type="checkbox" id="showDend" checked>
+    <span class="color-dot" style="background:#44aaff;"></span>
+    <label for="showDend">Dendrites (basal)</label>
+  </div>
+  <div class="ctrl-row">
+    <input type="checkbox" id="showApical" checked>
+    <span class="color-dot" style="background:#44ff88;"></span>
+    <label for="showApical">Apical dendrites</label>
+  </div>
+  <div class="ctrl-row">
+    <input type="checkbox" id="showThrough" checked>
+    <span class="color-dot" style="background:#ffaa44;"></span>
+    <label for="showThrough">Through-volume</label>
+  </div>
+
+  <h3>Display</h3>
+  <div class="ctrl-row">
+    <label>Voxel size:</label>
+    <input type="range" id="voxelSize" min="0.3" max="2.0" step="0.1" value="0.9">
+    <span class="val" id="voxelSizeVal">0.9</span>
+  </div>
+  <div class="ctrl-row">
+    <label>Opacity:</label>
+    <input type="range" id="opacity" min="0.1" max="1.0" step="0.05" value="0.85">
+    <span class="val" id="opacityVal">0.85</span>
+  </div>
+  <div class="ctrl-row">
+    <input type="checkbox" id="showGrid" checked>
+    <label for="showGrid">Grid</label>
+  </div>
+  <div class="ctrl-row">
+    <input type="checkbox" id="showAxes" checked>
+    <label for="showAxes">Axes</label>
+  </div>
+
+  <h3>Per-Neuron</h3>
+  <div id="neuronToggles"></div>
+
+  <div style="margin-top:10px;">
+    <button id="resetCamera">Reset Camera</button>
+    <button id="rebuildBtn">Rebuild</button>
+  </div>
+</div>
+
+<div id="stats">
+  <h3>Statistics</h3>
+  <div id="statsContent">No data loaded</div>
+</div>
+
+<div id="colorbar">
+  <div>Fluorescence</div>
+  <canvas id="colorbarCanvas" width="20" height="150"></canvas>
+  <div style="display:flex;justify-content:space-between;width:60px;margin:0 auto;">
+    <span id="cbMin">0.0</span>
+    <span id="cbMax">1.5</span>
+  </div>
+</div>
+
+<div id="info">
+  Drag: rotate | Scroll: zoom | Right-drag: pan | Step 6 Fluorescence Viewer
+</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+// ============================================================
+// Scene setup
+// ============================================================
+const container = document.getElementById('container');
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x1a1a2e);
+
+const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 3000);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setPixelRatio(window.devicePixelRatio);
+container.appendChild(renderer.domElement);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.05;
+
+// Lighting
+scene.add(new THREE.AmbientLight(0x808080, 0.9));
+const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+dirLight.position.set(150, 200, 150);
+scene.add(dirLight);
+const dirLight2 = new THREE.DirectionalLight(0xffffff, 0.3);
+dirLight2.position.set(-100, -50, -100);
+scene.add(dirLight2);
+
+// Helpers
+let gridHelper, axesHelper;
+function createHelpers(gridSize) {
+    if (gridHelper) scene.remove(gridHelper);
+    if (axesHelper) scene.remove(axesHelper);
+    gridHelper = new THREE.GridHelper(gridSize, 20, 0x333366, 0x222244);
+    axesHelper = new THREE.AxesHelper(gridSize * 0.6);
+    scene.add(gridHelper);
+    scene.add(axesHelper);
+}
+createHelpers(100);
+
+// ============================================================
+// Colormaps
+// ============================================================
+const colormaps = {
+    hot: (t) => {
+        // black -> red -> yellow -> white
+        const r = Math.min(1, t * 3);
+        const g = Math.min(1, Math.max(0, t * 3 - 1));
+        const b = Math.min(1, Math.max(0, t * 3 - 2));
+        return [r, g, b];
+    },
+    viridis: (t) => {
+        // Simplified viridis
+        const r = 0.267 + t * (0.993 - 0.267);
+        const g = 0.004 + t * (0.906 - 0.004);
+        const b = 0.329 + (1 - t) * (0.534 - 0.329) + t * (0.143 - 0.329 + 0.534);
+        return [
+            Math.min(1, Math.max(0, 0.267 + t * 0.726 * (t > 0.5 ? 1 : 0.5))),
+            Math.min(1, Math.max(0, t * 0.9)),
+            Math.min(1, Math.max(0, 0.53 - t * 0.4))
+        ];
+    },
+    plasma: (t) => {
+        const r = Math.min(1, 0.05 + t * 1.3);
+        const g = Math.min(1, Math.max(0, t * t * 1.5 - 0.1));
+        const b = Math.min(1, Math.max(0, 0.53 + (0.5 - Math.abs(t - 0.5)) * 0.9));
+        return [r, g, b];
+    },
+    cool: (t) => {
+        return [t, 1 - t, 1];
+    }
+};
+
+function getColor(value, cmin, cmax, cmapName) {
+    const t = Math.max(0, Math.min(1, (value - cmin) / (cmax - cmin || 1)));
+    return colormaps[cmapName](t);
+}
+
+function drawColorbar() {
+    const canvas = document.getElementById('colorbarCanvas');
+    const ctx = canvas.getContext('2d');
+    const cmin = parseFloat(document.getElementById('cmin').value);
+    const cmax = parseFloat(document.getElementById('cmax').value);
+    const cmapName = document.getElementById('colormap').value;
+
+    for (let y = 0; y < canvas.height; y++) {
+        const t = 1 - y / canvas.height;
+        const val = cmin + t * (cmax - cmin);
+        const [r, g, b] = getColor(val, cmin, cmax, cmapName);
+        ctx.fillStyle = `rgb(${r * 255 | 0},${g * 255 | 0},${b * 255 | 0})`;
+        ctx.fillRect(0, y, canvas.width, 1);
+    }
+    document.getElementById('cbMin').textContent = cmin.toFixed(2);
+    document.getElementById('cbMax').textContent = cmax.toFixed(2);
+}
+drawColorbar();
+
+// ============================================================
+// Mesh management
+// ============================================================
+let data = null;
+const meshGroups = {
+    soma: [],
+    dendrite: [],
+    apical: [],
+    through: [],
+};
+
+function clearMeshes() {
+    for (const key of Object.keys(meshGroups)) {
+        meshGroups[key].forEach(m => {
+            scene.remove(m);
+            m.geometry.dispose();
+            m.material.dispose();
+        });
+        meshGroups[key] = [];
+    }
+}
+
+function createInstancedMesh(positions, fluorValues, voxelSize, opacity, cmin, cmax, cmapName) {
+    const count = positions.length / 3;
+    if (count === 0) return null;
+
+    const geometry = new THREE.BoxGeometry(voxelSize, voxelSize, voxelSize);
+    const material = new THREE.MeshPhongMaterial({
+        vertexColors: false,
+        transparent: opacity < 1.0,
+        opacity: opacity,
+    });
+
+    const mesh = new THREE.InstancedMesh(geometry, material, count);
+    mesh.instanceColor = new THREE.InstancedBufferAttribute(
+        new Float32Array(count * 3), 3
+    );
+
+    const dummy = new THREE.Object3D();
+    const color = new THREE.Color();
+
+    for (let i = 0; i < count; i++) {
+        const x = positions[i * 3];
+        const z = positions[i * 3 + 1];  // Y -> Z swap
+        const y = positions[i * 3 + 2];  // Z -> Y swap
+        dummy.position.set(x, y, z);
+        dummy.updateMatrix();
+        mesh.setMatrixAt(i, dummy.matrix);
+
+        const fl = fluorValues[i];
+        const [r, g, b] = getColor(fl, cmin, cmax, cmapName);
+        color.setRGB(r, g, b);
+        mesh.setColorAt(i, color);
+    }
+    mesh.instanceMatrix.needsUpdate = true;
+    mesh.instanceColor.needsUpdate = true;
+
+    return mesh;
+}
+
+function buildScene() {
+    if (!data) return;
+    clearMeshes();
+
+    const voxelSize = parseFloat(document.getElementById('voxelSize').value);
+    const opacity = parseFloat(document.getElementById('opacity').value);
+    const cmin = parseFloat(document.getElementById('cmin').value);
+    const cmax = parseFloat(document.getElementById('cmax').value);
+    const cmapName = document.getElementById('colormap').value;
+
+    // Build per-neuron meshes
+    data.neurons.forEach((neur, idx) => {
+        // Soma
+        if (neur.soma.positions.length > 0) {
+            const m = createInstancedMesh(
+                neur.soma.positions, neur.soma.fluorescence,
+                voxelSize, opacity, cmin, cmax, cmapName
+            );
+            if (m) {
+                m.userData = { type: 'soma', neuronIdx: idx };
+                scene.add(m);
+                meshGroups.soma.push(m);
+            }
+        }
+
+        // Dendrites
+        if (neur.dendrite.positions.length > 0) {
+            const m = createInstancedMesh(
+                neur.dendrite.positions, neur.dendrite.fluorescence,
+                voxelSize * 0.8, opacity * 0.8, cmin, cmax, cmapName
+            );
+            if (m) {
+                m.userData = { type: 'dendrite', neuronIdx: idx };
+                scene.add(m);
+                meshGroups.dendrite.push(m);
+            }
+        }
+
+        // Apical
+        if (neur.apical.positions.length > 0) {
+            const m = createInstancedMesh(
+                neur.apical.positions, neur.apical.fluorescence,
+                voxelSize * 0.8, opacity * 0.8, cmin, cmax, cmapName
+            );
+            if (m) {
+                m.userData = { type: 'apical', neuronIdx: idx };
+                scene.add(m);
+                meshGroups.apical.push(m);
+            }
+        }
+    });
+
+    // Through-volume dendrites
+    data.through_volume_dendrites.forEach((td, idx) => {
+        if (td.positions.length > 0) {
+            const m = createInstancedMesh(
+                td.positions, td.fluorescence,
+                voxelSize * 0.7, opacity * 0.7, cmin, cmax, cmapName
+            );
+            if (m) {
+                m.userData = { type: 'through', throughIdx: idx };
+                scene.add(m);
+                meshGroups.through.push(m);
+            }
+        }
+    });
+
+    updateVisibility();
+    drawColorbar();
+}
+
+function updateVisibility() {
+    const showSoma = document.getElementById('showSoma').checked;
+    const showDend = document.getElementById('showDend').checked;
+    const showApical = document.getElementById('showApical').checked;
+    const showThrough = document.getElementById('showThrough').checked;
+
+    // Per-neuron toggles
+    const neuronVisible = {};
+    document.querySelectorAll('.neuron-toggle').forEach(el => {
+        neuronVisible[parseInt(el.dataset.idx)] = el.checked;
+    });
+
+    meshGroups.soma.forEach(m => {
+        m.visible = showSoma && (neuronVisible[m.userData.neuronIdx] !== false);
+    });
+    meshGroups.dendrite.forEach(m => {
+        m.visible = showDend && (neuronVisible[m.userData.neuronIdx] !== false);
+    });
+    meshGroups.apical.forEach(m => {
+        m.visible = showApical && (neuronVisible[m.userData.neuronIdx] !== false);
+    });
+    meshGroups.through.forEach(m => {
+        m.visible = showThrough;
+    });
+
+    if (gridHelper) gridHelper.visible = document.getElementById('showGrid').checked;
+    if (axesHelper) axesHelper.visible = document.getElementById('showAxes').checked;
+}
+
+function fitCamera() {
+    const box = new THREE.Box3();
+    let hasMesh = false;
+    for (const group of Object.values(meshGroups)) {
+        group.forEach(m => {
+            if (m.visible) { box.expandByObject(m); hasMesh = true; }
+        });
+    }
+    if (!hasMesh) return;
+
+    const center = box.getCenter(new THREE.Vector3());
+    const size = box.getSize(new THREE.Vector3());
+    const maxDim = Math.max(size.x, size.y, size.z);
+
+    camera.position.set(
+        center.x + maxDim * 0.9,
+        center.y + maxDim * 0.7,
+        center.z + maxDim * 0.9
+    );
+    controls.target.copy(center);
+    controls.update();
+}
+
+// ============================================================
+// Data loading
+// ============================================================
+function loadData(jsonData) {
+    data = jsonData;
+    document.getElementById('loading').style.display = 'none';
+
+    // Stats
+    const s = data.stats;
+    const fs = data.fluorescence_stats;
+    let html = '';
+    html += `<div class="stat-row"><span>Source</span><span class="stat-val">${data.source}</span></div>`;
+    html += `<div class="stat-row"><span>Grid</span><span class="stat-val">${data.grid_shape.join('×')}</span></div>`;
+    html += `<div class="stat-row"><span>Neurons</span><span class="stat-val">${data.params.N_neur}</span></div>`;
+    html += `<div class="stat-row"><span>Through-vol</span><span class="stat-val">${data.params.N_den}</span></div>`;
+    html += '<div style="border-top:1px solid #333;margin:4px 0;"></div>';
+    html += `<div class="stat-row"><span>Soma voxels</span><span class="stat-val">${s.total_soma_voxels.toLocaleString()}</span></div>`;
+    html += `<div class="stat-row"><span>Dendrite voxels</span><span class="stat-val">${s.total_dendrite_voxels.toLocaleString()}</span></div>`;
+    html += `<div class="stat-row"><span>Apical voxels</span><span class="stat-val">${s.total_apical_voxels.toLocaleString()}</span></div>`;
+    html += `<div class="stat-row"><span>Through-vol voxels</span><span class="stat-val">${s.total_through_volume_voxels.toLocaleString()}</span></div>`;
+    html += '<div style="border-top:1px solid #333;margin:4px 0;"></div>';
+    html += `<div class="stat-row"><span>Fluor min</span><span class="stat-val">${fs.min.toFixed(3)}</span></div>`;
+    html += `<div class="stat-row"><span>Fluor max</span><span class="stat-val">${fs.max.toFixed(3)}</span></div>`;
+    html += `<div class="stat-row"><span>Fluor mean</span><span class="stat-val">${fs.mean.toFixed(3)}</span></div>`;
+    document.getElementById('statsContent').innerHTML = html;
+
+    // Per-neuron toggles
+    const neuronColors = ['#ff4444', '#44ff44', '#4488ff', '#ffaa00', '#ff44ff',
+                          '#44ffff', '#ff8844', '#88ff44', '#4444ff', '#ffff44'];
+    let toggleHtml = '';
+    data.neurons.forEach((neur, idx) => {
+        const c = neuronColors[idx % neuronColors.length];
+        const total = neur.soma.count + neur.dendrite.count + neur.apical.count;
+        toggleHtml += `<div class="ctrl-row">
+            <input type="checkbox" class="neuron-toggle" data-idx="${idx}" checked>
+            <span class="color-dot" style="background:${c};"></span>
+            <label>N${neur.id} (${total})</label>
+        </div>`;
+    });
+    document.getElementById('neuronToggles').innerHTML = toggleHtml;
+
+    // Bind neuron toggles
+    document.querySelectorAll('.neuron-toggle').forEach(el => {
+        el.addEventListener('change', updateVisibility);
+    });
+
+    const gs = data.grid_shape;
+    createHelpers(Math.max(gs[0], gs[1], gs[2]) * 1.2);
+
+    buildScene();
+    fitCamera();
+}
+
+document.getElementById('fileInput').addEventListener('change', (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    document.getElementById('loading').textContent = 'Loading...';
+    document.getElementById('loading').style.display = 'block';
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+        try {
+            const json = JSON.parse(ev.target.result);
+            loadData(json);
+        } catch (err) {
+            alert('Error parsing JSON: ' + err.message);
+            document.getElementById('loading').style.display = 'none';
+        }
+    };
+    reader.readAsText(file);
+});
+
+// ============================================================
+// Event bindings
+// ============================================================
+['showSoma', 'showDend', 'showApical', 'showThrough', 'showGrid', 'showAxes'].forEach(id => {
+    document.getElementById(id).addEventListener('change', updateVisibility);
+});
+
+document.getElementById('rebuildBtn').addEventListener('click', buildScene);
+document.getElementById('resetCamera').addEventListener('click', fitCamera);
+
+// Sliders that need rebuild
+['voxelSize', 'opacity', 'cmin', 'cmax'].forEach(id => {
+    const el = document.getElementById(id);
+    const valEl = document.getElementById(id + 'Val');
+    el.addEventListener('input', () => {
+        if (valEl) valEl.textContent = parseFloat(el.value).toFixed(2);
+        drawColorbar();
+    });
+    el.addEventListener('change', buildScene);
+});
+
+document.getElementById('colormap').addEventListener('change', buildScene);
+
+// Window resize
+window.addEventListener('resize', () => {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+// Animation loop
+function animate() {
+    requestAnimationFrame(animate);
+    controls.update();
+    renderer.render(scene, camera);
+}
+animate();
+</script>
+</body>
+</html>
