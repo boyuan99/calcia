@@ -1,0 +1,15 @@
+# Core dependencies
+numpy>=1.20.0
+scipy>=1.7.0
+
+# Geometry and mesh processing
+trimesh>=3.9.0
+
+# Optional but recommended
+matplotlib>=3.4.0  # For visualization
+numba>=0.53.0      # For Dijkstra acceleration
+
+# Development dependencies
+pytest>=6.0.0
+pytest-cov>=2.0.0
+pyinstrument>=4.0.0  # Profiling

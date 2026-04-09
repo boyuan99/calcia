@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Test / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Simulation output data (large binary/json files)
+examples/output/
+*.npz
+*.mat
+
+# Visualization export data (generated, not source)
+comparison_tools/*.json
+comparison_tools/*.png
+comparison_tools/*.mat
+
+# Root-level generated images
+*.png
+
+# OS
+.DS_Store
+Thumbs.db
+nul

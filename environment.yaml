@@ -1,0 +1,16 @@
+name: calcia
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python>=3.8
+
+  # Conda-optimized (MKL/OpenBLAS)
+  - numpy>=1.20.0
+  - scipy>=1.7.0
+  - numba>=0.53.0
+
+  # Remaining dependencies from pyproject.toml
+  - pip
+  - pip:
+      - -e ".[dev,all]"
