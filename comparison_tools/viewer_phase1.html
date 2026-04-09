@@ -1,0 +1,445 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Phase 1 Comparison: MATLAB vs Python</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #111; color: #eee; font-family: monospace; overflow: hidden; }
+
+    #header {
+      position: fixed; top: 0; left: 0; right: 0; height: 36px; z-index: 10;
+      background: #1a1a2e; border-bottom: 1px solid #333;
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 0 12px;
+    }
+    #header h1 { font-size: 13px; color: #adf; }
+    #header .hint { font-size: 11px; color: #666; }
+
+    #labels {
+      position: fixed; top: 36px; left: 0; right: 0; height: 22px; z-index: 10;
+      display: flex;
+    }
+    .panel-label {
+      flex: 1; text-align: center; line-height: 22px;
+      font-size: 12px; font-weight: bold; background: #161625;
+      border-bottom: 2px solid;
+    }
+    .panel-label.matlab { border-color: #f0a; color: #f8c; }
+    .panel-label.python { border-color: #4f8; color: #8fc; }
+
+    #canvas-container {
+      position: fixed; top: 58px; left: 0; right: 0; bottom: 110px;
+    }
+    #canvas { width: 100%; height: 100%; display: block; }
+
+    #divider {
+      position: fixed; top: 58px; bottom: 110px;
+      left: 50%; width: 1px; background: #444; z-index: 5;
+    }
+
+    #stats-bar {
+      position: fixed; bottom: 0; left: 0; right: 0; height: 110px; z-index: 10;
+      display: flex; background: #0d0d1a; border-top: 1px solid #333;
+    }
+    .stats-panel {
+      flex: 1; padding: 8px 12px; border-right: 1px solid #333;
+      font-size: 11px;
+    }
+    .stats-panel:last-child { border-right: none; }
+    .stats-panel h3 { font-size: 11px; margin-bottom: 4px; color: #999; }
+    .stat-row { display: flex; justify-content: space-between; margin: 2px 0; }
+    .stat-label { color: #888; }
+    .stat-val { color: #eee; }
+    .diff-pos { color: #f88; }
+    .diff-neg { color: #8f8; }
+
+    #legend {
+      position: fixed; top: 68px; right: 8px; z-index: 10;
+      background: rgba(10,10,20,0.85); border: 1px solid #333; border-radius: 4px;
+      padding: 6px 10px; font-size: 11px;
+    }
+    .leg-item { display: flex; align-items: center; margin: 2px 0; }
+    .leg-dot {
+      width: 10px; height: 10px; border-radius: 50%;
+      margin-right: 6px; flex-shrink: 0;
+    }
+
+    #loading {
+      position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+      background: #111; z-index: 100;
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      font-size: 14px; color: #888;
+    }
+    #loading .prog { margin-top: 16px; width: 300px; height: 4px; background: #333; border-radius: 2px; }
+    #loading .prog-fill { height: 100%; background: #46f; border-radius: 2px; transition: width 0.3s; }
+    #loading .msg { margin-top: 8px; font-size: 12px; }
+    #loading .err { color: #f44; margin-top: 8px; max-width: 500px; text-align: center; }
+  </style>
+</head>
+<body>
+
+<div id="loading">
+  <div>Loading Phase 1 Simulation Data...</div>
+  <div class="prog"><div class="prog-fill" id="prog-fill" style="width:0%"></div></div>
+  <div class="msg" id="load-msg">Initializing...</div>
+  <div class="err" id="load-err"></div>
+</div>
+
+<div id="header">
+  <h1>Phase 1 Neural Volume — MATLAB (seed=43) vs Python (seed=42)</h1>
+  <span class="hint">Left-drag: rotate &nbsp;|&nbsp; Right-drag: pan &nbsp;|&nbsp; Scroll: zoom &nbsp;|&nbsp; Cameras are synchronized</span>
+</div>
+<div id="labels">
+  <div class="panel-label matlab">MATLAB (NAOMi, seed=43)</div>
+  <div class="panel-label python">Python (calcia, seed=42)</div>
+</div>
+<div id="canvas-container">
+  <canvas id="canvas"></canvas>
+</div>
+<div id="divider"></div>
+
+<div id="legend">
+  <div class="leg-item"><div class="leg-dot" style="background:#ff6666"></div>Soma</div>
+  <div class="leg-item"><div class="leg-dot" style="background:#ffaa44"></div>Dendrites</div>
+  <div class="leg-item"><div class="leg-dot" style="background:#ffffff"></div>Nucleus</div>
+  <div class="leg-item"><div class="leg-dot" style="background:#44ccff"></div>Apical</div>
+  <div class="leg-item"><div class="leg-dot" style="background:#ff3333"></div>Vessels</div>
+  <div class="leg-item"><div class="leg-dot" style="background:#556655"></div>Background</div>
+</div>
+
+<div id="stats-bar">
+  <div class="stats-panel" id="stats-matlab">
+    <h3>MATLAB Stats</h3>
+    <div class="stat-row"><span class="stat-label">Loading...</span></div>
+  </div>
+  <div class="stats-panel" id="stats-python">
+    <h3>Python Stats</h3>
+    <div class="stat-row"><span class="stat-label">Loading...</span></div>
+  </div>
+</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.163.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.163.0/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+// ---- Neuron palette (25 distinct hues, cycling for 625 neurons) ----
+const PALETTE = [
+  0xff4444, 0xff8844, 0xffcc44, 0x88ff44, 0x44ff88,
+  0x44ffcc, 0x44ccff, 0x4488ff, 0x8844ff, 0xcc44ff,
+  0xff44cc, 0xff4488, 0xff6600, 0x00ff66, 0x0066ff,
+  0xff0066, 0x66ff00, 0x6600ff, 0xffff00, 0x00ffff,
+  0xff00ff, 0xff9900, 0x99ff00, 0x0099ff, 0xff0099,
+];
+
+function neuronColor(id) {
+  return PALETTE[(id - 1) % PALETTE.length];
+}
+
+function darken(hex, factor = 0.5) {
+  const r = ((hex >> 16) & 0xff) * factor;
+  const g = ((hex >> 8) & 0xff) * factor;
+  const b = (hex & 0xff) * factor;
+  return (Math.round(r) << 16) | (Math.round(g) << 8) | Math.round(b);
+}
+
+// ---- Point cloud builder ----
+function makePoints(flatCoords, color, size = 1.0) {
+  if (!flatCoords || flatCoords.length === 0) return null;
+  const n = flatCoords.length / 3;
+  const positions = new Float32Array(n * 3);
+  for (let i = 0; i < n; i++) {
+    positions[i * 3]     = flatCoords[i * 3];
+    positions[i * 3 + 1] = flatCoords[i * 3 + 1];
+    positions[i * 3 + 2] = flatCoords[i * 3 + 2];
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  const mat = new THREE.PointsMaterial({ color, size, sizeAttenuation: false });
+  return new THREE.Points(geo, mat);
+}
+
+function makeMultiNeuronPoints(neurons, accessor, colorFn, size) {
+  // Merge all neurons into one geometry with per-vertex color
+  const allPos = [];
+  const allCol = [];
+  for (const neu of neurons) {
+    const flat = neu[accessor];
+    if (!flat || flat.length === 0) continue;
+    const c = new THREE.Color(colorFn(neu.id));
+    for (let i = 0; i < flat.length; i += 3) {
+      allPos.push(flat[i], flat[i + 1], flat[i + 2]);
+      allCol.push(c.r, c.g, c.b);
+    }
+  }
+  if (allPos.length === 0) return null;
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(allPos), 3));
+  geo.setAttribute('color', new THREE.BufferAttribute(new Float32Array(allCol), 3));
+  const mat = new THREE.PointsMaterial({ size, sizeAttenuation: false, vertexColors: true });
+  return new THREE.Points(geo, mat);
+}
+
+function buildScene(data) {
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x0a0a14);
+
+  const gs = data.grid_shape;  // [Nx, Ny, Nz]
+  const cx = gs[0] / 2, cy = gs[1] / 2, cz = gs[2] / 2;
+
+  function addPts(flat, color, size = 1.0) {
+    const pts = makePoints(flat, color, size);
+    if (pts) {
+      pts.position.set(-cx, -cy, -cz);
+      scene.add(pts);
+    }
+  }
+
+  // Dendrites (darker per-neuron color)
+  const dendPts = makeMultiNeuronPoints(
+    data.neurons, 'dendrite_positions',
+    id => darken(neuronColor(id), 0.55), 1.0
+  );
+  if (dendPts) { dendPts.position.set(-cx, -cy, -cz); scene.add(dendPts); }
+
+  // Soma (bright per-neuron color)
+  const somaPts = makeMultiNeuronPoints(
+    data.neurons, 'soma_positions',
+    id => neuronColor(id), 1.5
+  );
+  if (somaPts) { somaPts.position.set(-cx, -cy, -cz); scene.add(somaPts); }
+
+  // Nucleus (white)
+  const nucPts = makeMultiNeuronPoints(
+    data.neurons, 'nucleus_positions',
+    () => 0xffffff, 1.5
+  );
+  if (nucPts) { nucPts.position.set(-cx, -cy, -cz); scene.add(nucPts); }
+
+  // Apical dendrites (cyan)
+  addPts(data.apical_positions, 0x44ccff, 1.0);
+
+  // Vessels (red)
+  addPts(data.vessel_positions, 0xff3333, 1.5);
+
+  // Background (dark green-gray)
+  addPts(data.bg_positions, 0x446644, 1.0);
+
+  // Bounding box
+  const boxGeo = new THREE.BoxGeometry(gs[0], gs[1], gs[2]);
+  const boxMat = new THREE.MeshBasicMaterial({ color: 0x334, wireframe: true });
+  scene.add(new THREE.Mesh(boxGeo, boxMat));
+
+  return scene;
+}
+
+// ---- Stats panel ----
+function pct(val, ref) {
+  if (ref === 0) return '---';
+  const d = ((val - ref) / ref) * 100;
+  const sign = d >= 0 ? '+' : '';
+  const cls = Math.abs(d) > 15 ? (d > 0 ? 'diff-pos' : 'diff-neg') : '';
+  return `<span class="${cls}">${sign}${d.toFixed(1)}%</span>`;
+}
+
+function renderStats(elId, data, refData, label) {
+  const s = data.stats;
+  const rs = refData ? refData.stats : null;
+  const el = document.getElementById(elId);
+  const fmt = (v, digits = 0) => v == null ? '---' :
+    (digits > 0 ? v.toFixed(digits) : Math.round(v).toLocaleString());
+  const row = (lbl, val, ref) => `
+    <div class="stat-row">
+      <span class="stat-label">${lbl}</span>
+      <span class="stat-val">${fmt(val)} ${rs ? pct(val, ref) : ''}</span>
+    </div>`;
+
+  el.innerHTML = `<h3>${label} Stats</h3>
+    ${row('Neurons', s.n_neurons, rs?.n_neurons)}
+    ${row('Mean soma (vox)', s.mean_soma_size, rs?.mean_soma_size)}
+    ${row('Mean nuc (vox)', s.mean_nuc_size, rs?.mean_nuc_size)}
+    ${row('Vessel voxels', s.vessel_voxels, rs?.vessel_voxels)}
+    ${row('Apical voxels', s.apical_count, rs?.apical_count)}
+    ${row('BG processes', s.n_bg_proc, rs?.n_bg_proc)}
+    <div class="stat-row">
+      <span class="stat-label">Fluor coverage</span>
+      <span class="stat-val">${(s.fluor_fraction * 100).toFixed(1)}% ${rs ? pct(s.fluor_fraction, rs.fluor_fraction) : ''}</span>
+    </div>
+    <div class="stat-row">
+      <span class="stat-label">Fluor mean</span>
+      <span class="stat-val">${s.fluor_mean.toFixed(4)} ${rs ? pct(s.fluor_mean, rs.fluor_mean) : ''}</span>
+    </div>`;
+}
+
+// ---- Main ----
+async function loadJSON(url, progressStart, progressEnd) {
+  const msgEl = document.getElementById('load-msg');
+  const fillEl = document.getElementById('prog-fill');
+  msgEl.textContent = `Fetching ${url.split('/').pop()}...`;
+
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`HTTP ${res.status} — ${url}\nMake sure to serve this file with a local web server:\n  cd comparison_tools && python -m http.server 8080`);
+
+  const total = +res.headers.get('Content-Length') || 0;
+  const reader = res.body.getReader();
+  const chunks = [];
+  let loaded = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    loaded += value.length;
+    if (total) {
+      const pct = progressStart + (loaded / total) * (progressEnd - progressStart);
+      fillEl.style.width = pct + '%';
+    }
+  }
+  fillEl.style.width = progressEnd + '%';
+  const blob = new Blob(chunks);
+  const text = await blob.text();
+  msgEl.textContent = `Parsing ${url.split('/').pop()}...`;
+  return JSON.parse(text);
+}
+
+async function main() {
+  const errEl = document.getElementById('load-err');
+  const fillEl = document.getElementById('prog-fill');
+  const msgEl = document.getElementById('load-msg');
+
+  let matlabData, pythonData;
+  try {
+    matlabData = await loadJSON('matlab_phase1_viz.json', 0, 45);
+    pythonData = await loadJSON('python_phase1_viz.json', 45, 90);
+  } catch (e) {
+    errEl.textContent = e.message;
+    fillEl.style.background = '#f44';
+    msgEl.textContent = 'Failed to load data.';
+    return;
+  }
+
+  msgEl.textContent = 'Building 3D scenes...';
+  fillEl.style.width = '92%';
+
+  const matlabScene = buildScene(matlabData);
+  const pythonScene = buildScene(pythonData);
+
+  // ---- Renderer ----
+  const canvas = document.getElementById('canvas');
+  const container = document.getElementById('canvas-container');
+
+  const renderer = new THREE.WebGLRenderer({ canvas, antialias: false });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  renderer.autoClear = false;
+
+  function resize() {
+    const w = container.clientWidth;
+    const h = container.clientHeight;
+    renderer.setSize(w, h);
+    camera1.aspect = (w / 2) / h;
+    camera1.updateProjectionMatrix();
+    camera2.aspect = (w / 2) / h;
+    camera2.updateProjectionMatrix();
+  }
+
+  // ---- Cameras ----
+  const fov = 45;
+  const camera1 = new THREE.PerspectiveCamera(fov, 1, 1, 5000);
+  const camera2 = new THREE.PerspectiveCamera(fov, 1, 1, 5000);
+  const gs = matlabData.grid_shape;
+  const dist = Math.max(gs[0], gs[1], gs[2]) * 1.4;
+  camera1.position.set(dist * 0.6, -dist * 0.5, dist * 0.7);
+  camera2.position.copy(camera1.position);
+  camera1.lookAt(0, 0, 0);
+  camera2.lookAt(0, 0, 0);
+
+  // ---- Controls ----
+  // We need two OrbitControls instances pointing at two halves of the canvas.
+  // To achieve this, we create two invisible overlay divs for mouse capture.
+  const container1 = document.createElement('div');
+  const container2 = document.createElement('div');
+  for (const d of [container1, container2]) {
+    d.style.cssText = 'position:absolute;top:0;bottom:0;width:50%;';
+    d.tabIndex = 0;
+    container.appendChild(d);
+  }
+  container1.style.left = '0';
+  container2.style.left = '50%';
+
+  const controls1 = new OrbitControls(camera1, container1);
+  const controls2 = new OrbitControls(camera2, container2);
+  for (const c of [controls1, controls2]) {
+    c.enableDamping = true;
+    c.dampingFactor = 0.08;
+    c.zoomSpeed = 1.2;
+  }
+
+  // Sync cameras
+  let syncing = false;
+  function syncCam(src, srcCtrl, dst, dstCtrl) {
+    if (syncing) return;
+    syncing = true;
+    dst.position.copy(src.position);
+    dst.quaternion.copy(src.quaternion);
+    dstCtrl.target.copy(srcCtrl.target);
+    dstCtrl.update();
+    syncing = false;
+  }
+  controls1.addEventListener('change', () => syncCam(camera1, controls1, camera2, controls2));
+  controls2.addEventListener('change', () => syncCam(camera2, controls2, camera1, controls1));
+
+  resize();
+  window.addEventListener('resize', resize);
+
+  // ---- Stats ----
+  renderStats('stats-matlab', matlabData, pythonData, 'MATLAB');
+  renderStats('stats-python', pythonData, matlabData, 'Python');
+
+  // ---- Animate ----
+  function animate() {
+    requestAnimationFrame(animate);
+    controls1.update();
+    controls2.update();
+
+    const w = container.clientWidth;
+    const h = container.clientHeight;
+    const hw = Math.floor(w / 2);
+
+    renderer.clear();
+    renderer.setScissorTest(true);
+
+    // Left: MATLAB
+    renderer.setViewport(0, 0, hw, h);
+    renderer.setScissor(0, 0, hw, h);
+    renderer.render(matlabScene, camera1);
+
+    // Right: Python
+    renderer.setViewport(hw, 0, w - hw, h);
+    renderer.setScissor(hw, 0, w - hw, h);
+    renderer.render(pythonScene, camera2);
+
+    renderer.setScissorTest(false);
+  }
+
+  fillEl.style.width = '100%';
+  msgEl.textContent = 'Done!';
+  setTimeout(() => { document.getElementById('loading').style.display = 'none'; }, 300);
+
+  animate();
+}
+
+main().catch(e => {
+  document.getElementById('load-err').textContent = String(e);
+  document.getElementById('load-msg').textContent = 'Error.';
+});
+</script>
+</body>
+</html>

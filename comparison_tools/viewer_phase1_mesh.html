@@ -1,0 +1,483 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Phase 1 Mesh Comparison: MATLAB vs Python</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #0a0a14; color: #eee; font-family: monospace; overflow: hidden; }
+
+    #header {
+      position: fixed; top: 0; left: 0; right: 0; height: 36px; z-index: 10;
+      background: #12122a; border-bottom: 1px solid #2a2a4a;
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 0 14px;
+    }
+    #header h1 { font-size: 13px; color: #9af; letter-spacing: 0.03em; }
+    #header .hint { font-size: 11px; color: #555; }
+
+    #labels {
+      position: fixed; top: 36px; left: 0; right: 0; height: 24px; z-index: 10;
+      display: flex;
+    }
+    .panel-label {
+      flex: 1; text-align: center; line-height: 24px;
+      font-size: 12px; font-weight: bold; background: #0e0e20;
+      border-bottom: 2px solid;
+    }
+    .panel-label.matlab { border-color: #e05; color: #f7c; }
+    .panel-label.python { border-color: #0c8; color: #7fc; }
+
+    #canvas-container {
+      position: fixed; top: 60px; left: 0; right: 0; bottom: 118px;
+    }
+    #canvas { width: 100%; height: 100%; display: block; }
+    #divider {
+      position: fixed; top: 60px; bottom: 118px;
+      left: 50%; width: 1px; background: #2a2a4a; z-index: 5; pointer-events: none;
+    }
+
+    /* Overlay controls for mouse input */
+    .viewport-overlay {
+      position: absolute; top: 0; bottom: 0; width: 50%;
+      cursor: grab;
+    }
+    .viewport-overlay:active { cursor: grabbing; }
+    #overlay-left  { left: 0; }
+    #overlay-right { left: 50%; }
+
+    #stats-bar {
+      position: fixed; bottom: 0; left: 0; right: 0; height: 118px; z-index: 10;
+      display: flex; background: #0b0b1e; border-top: 1px solid #1e1e3a;
+    }
+    .stats-panel { flex: 1; padding: 8px 14px; border-right: 1px solid #1e1e3a; font-size: 11px; }
+    .stats-panel:last-child { border-right: none; }
+    .stats-panel h3 { font-size: 11px; margin-bottom: 5px; color: #778; letter-spacing: 0.05em; text-transform: uppercase; }
+    .stat-row { display: flex; justify-content: space-between; margin: 2px 0; }
+    .stat-label { color: #667; }
+    .stat-val { color: #ccd; }
+    .diff-hi { color: #f88; }  /* >15% higher than ref */
+    .diff-lo { color: #8f8; }  /* >15% lower than ref */
+
+    #legend {
+      position: fixed; top: 68px; right: 10px; z-index: 20;
+      background: rgba(8,8,20,0.88); border: 1px solid #2a2a4a; border-radius: 4px;
+      padding: 7px 12px; font-size: 11px; pointer-events: none;
+    }
+    .leg-row { display: flex; align-items: center; margin: 3px 0; }
+    .leg-dot { width: 11px; height: 11px; border-radius: 50%; margin-right: 7px; flex-shrink: 0; }
+
+    #controls {
+      position: fixed; top: 68px; left: 10px; z-index: 20;
+      background: rgba(8,8,20,0.88); border: 1px solid #2a2a4a; border-radius: 4px;
+      padding: 7px 12px; font-size: 11px;
+    }
+    .ctrl-row { display: flex; align-items: center; margin: 3px 0; gap: 8px; }
+    .ctrl-row label { color: #889; cursor: pointer; }
+    .ctrl-row input[type=checkbox] { cursor: pointer; accent-color: #46f; }
+    .ctrl-row input[type=range] { width: 70px; accent-color: #46f; cursor: pointer; }
+
+    #loading {
+      position: fixed; inset: 0; background: #0a0a14; z-index: 100;
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      gap: 10px; font-size: 13px; color: #778;
+    }
+    .prog-wrap { width: 320px; height: 5px; background: #1e1e3a; border-radius: 3px; }
+    .prog-fill  { height: 100%; background: #46f; border-radius: 3px; transition: width 0.2s; }
+    .load-msg { font-size: 12px; color: #668; }
+    .load-err { color: #f55; max-width: 500px; text-align: center; white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+
+<div id="loading">
+  <div>Loading Phase 1 Mesh Data...</div>
+  <div class="prog-wrap"><div class="prog-fill" id="prog-fill" style="width:0%"></div></div>
+  <div class="load-msg" id="load-msg">Initializing...</div>
+  <div class="load-err" id="load-err"></div>
+</div>
+
+<div id="header">
+  <h1>Phase 1 Neural Volume — MATLAB (seed=43) vs Python (seed=42)&nbsp;&nbsp;·&nbsp;&nbsp;Mesh Visualization</h1>
+  <span class="hint">Drag: rotate &nbsp;·&nbsp; Right/Ctrl+drag: pan &nbsp;·&nbsp; Scroll: zoom &nbsp;·&nbsp; Cameras synchronized</span>
+</div>
+
+<div id="labels">
+  <div class="panel-label matlab">MATLAB (NAOMi · seed=43)</div>
+  <div class="panel-label python">Python (calcia · seed=42)</div>
+</div>
+
+<div id="canvas-container">
+  <canvas id="canvas"></canvas>
+  <div class="viewport-overlay" id="overlay-left"></div>
+  <div class="viewport-overlay" id="overlay-right"></div>
+</div>
+<div id="divider"></div>
+
+<div id="legend">
+  <div class="leg-row"><div class="leg-dot" style="background:#ff8866"></div>Soma (mesh)</div>
+  <div class="leg-row"><div class="leg-dot" style="background:#8855aa"></div>Nucleus (mesh)</div>
+  <div class="leg-row"><div class="leg-dot" style="background:#ddaa55"></div>Dendrites</div>
+  <div class="leg-row"><div class="leg-dot" style="background:#33ccff"></div>Apical</div>
+  <div class="leg-row"><div class="leg-dot" style="background:#ee2244"></div>Vessels</div>
+  <div class="leg-row"><div class="leg-dot" style="background:#336644"></div>Background</div>
+</div>
+
+<div id="controls">
+  <div class="ctrl-row">
+    <input type="checkbox" id="chk-soma"   checked> <label for="chk-soma">Soma</label>
+    <input type="checkbox" id="chk-nuc"    checked> <label for="chk-nuc">Nucleus</label>
+  </div>
+  <div class="ctrl-row">
+    <input type="checkbox" id="chk-dend"   checked> <label for="chk-dend">Dendrites</label>
+    <input type="checkbox" id="chk-apical" checked> <label for="chk-apical">Apical</label>
+  </div>
+  <div class="ctrl-row">
+    <input type="checkbox" id="chk-ves"    checked> <label for="chk-ves">Vessels</label>
+    <input type="checkbox" id="chk-bg"          > <label for="chk-bg">Background</label>
+  </div>
+  <div class="ctrl-row" style="margin-top:5px">
+    <label for="sl-opacity" style="color:#668">Soma α</label>
+    <input type="range" id="sl-opacity" min="10" max="100" value="90" step="5">
+  </div>
+</div>
+
+<div id="stats-bar">
+  <div class="stats-panel" id="stats-matlab"><h3>MATLAB</h3></div>
+  <div class="stats-panel" id="stats-python"><h3>Python</h3></div>
+</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.163.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.163.0/examples/jsm/"
+  }
+}
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+// ─── Mesh builder from flat JSON arrays ───────────────────────────────────────
+
+function buildMesh(vertsFlat, facesFlat, colorsFlat, opts = {}) {
+  if (!vertsFlat || vertsFlat.length === 0) return null;
+  const nv = vertsFlat.length / 3;
+  const posArr = new Float32Array(nv * 3);
+  for (let i = 0; i < nv * 3; i++) posArr[i] = vertsFlat[i];
+
+  const colArr = new Float32Array(nv * 3);
+  if (colorsFlat && colorsFlat.length === nv * 3) {
+    for (let i = 0; i < nv * 3; i++) colArr[i] = colorsFlat[i];
+  }
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(posArr, 3));
+  geo.setAttribute('color',    new THREE.BufferAttribute(colArr, 3));
+
+  if (facesFlat && facesFlat.length > 0) {
+    const nf = facesFlat.length;
+    const idxArr = nv * 3 > 65535 ? new Uint32Array(nf) : new Uint16Array(nf);
+    for (let i = 0; i < nf; i++) idxArr[i] = facesFlat[i];
+    geo.setIndex(new THREE.BufferAttribute(idxArr, 1));
+  }
+
+  geo.computeVertexNormals();
+
+  const mat = new THREE.MeshPhongMaterial({
+    vertexColors: true,
+    side: THREE.DoubleSide,
+    shininess: 60,
+    specular: new THREE.Color(0x333333),
+    transparent: opts.transparent ?? false,
+    opacity: opts.opacity ?? 1.0,
+    depthWrite: !(opts.transparent ?? false),
+  });
+
+  return new THREE.Mesh(geo, mat);
+}
+
+// ─── Point cloud builder ───────────────────────────────────────────────────────
+
+function buildPoints(ptsFlat, colorHex, ptColorsFlat, size = 2.0) {
+  // ptsFlat: [x,y,z, ...], ptColorsFlat: optional [r,g,b,...] in 0-255
+  if (!ptsFlat || ptsFlat.length === 0) return null;
+  const n = ptsFlat.length / 3;
+  const pos = new Float32Array(n * 3);
+  for (let i = 0; i < n * 3; i++) pos[i] = ptsFlat[i];
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+
+  let mat;
+  if (ptColorsFlat && ptColorsFlat.length === n * 3) {
+    const col = new Float32Array(n * 3);
+    for (let i = 0; i < n * 3; i++) col[i] = ptColorsFlat[i] / 255.0;
+    geo.setAttribute('color', new THREE.BufferAttribute(col, 3));
+    mat = new THREE.PointsMaterial({ vertexColors: true, size, sizeAttenuation: false });
+  } else {
+    mat = new THREE.PointsMaterial({ color: colorHex, size, sizeAttenuation: false });
+  }
+  return new THREE.Points(geo, mat);
+}
+
+// ─── Scene builder ────────────────────────────────────────────────────────────
+
+function buildScene(data) {
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x080814);
+
+  const gs = data.grid_shape;
+  const cx = gs[0] / 2, cy = gs[1] / 2, cz = gs[2] / 2;
+
+  // Offset group so scene is centered at origin
+  const root = new THREE.Group();
+  root.position.set(-cx, -cy, -cz);
+  scene.add(root);
+
+  // Lighting (two directional + ambient)
+  scene.add(new THREE.AmbientLight(0xffffff, 0.35));
+  const dl1 = new THREE.DirectionalLight(0xffffff, 0.9);
+  dl1.position.set(gs[0] * 1.2, gs[1] * 0.8, gs[2] * 2);
+  scene.add(dl1);
+  const dl2 = new THREE.DirectionalLight(0x8899cc, 0.4);
+  dl2.position.set(-gs[0], -gs[1], -gs[2]);
+  scene.add(dl2);
+
+  const layers = {};
+
+  // Soma mesh
+  const somaMesh = buildMesh(data.soma_verts, data.soma_faces, data.soma_colors,
+                              { transparent: false, opacity: 0.9 });
+  if (somaMesh) { root.add(somaMesh); layers.soma = somaMesh; }
+
+  // Nucleus mesh (slightly transparent so soma is visible around it)
+  const nucMesh = buildMesh(data.nuc_verts, data.nuc_faces, data.nuc_colors,
+                             { transparent: true, opacity: 0.80 });
+  if (nucMesh) { root.add(nucMesh); layers.nuc = nucMesh; }
+
+  // Dendrites
+  const dendPts = buildPoints(data.dend_pts, 0xddaa55, data.dend_colors, 2.0);
+  if (dendPts) { root.add(dendPts); layers.dend = dendPts; }
+
+  // Apical (cyan)
+  const apPts = buildPoints(data.apical_pts, 0x33ccff, null, 1.5);
+  if (apPts) { root.add(apPts); layers.apical = apPts; }
+
+  // Vessels — mesh if available, fallback to points
+  if (data.vessel_verts && data.vessel_verts.length > 0) {
+    // Uniform red color array (per-vertex)
+    const nv = data.vessel_verts.length / 3;
+    const vesColors = new Array(nv * 3).fill(0);
+    for (let i = 0; i < nv; i++) { vesColors[i*3] = 0.93; vesColors[i*3+1] = 0.13; vesColors[i*3+2] = 0.27; }
+    const vesMesh = buildMesh(data.vessel_verts, data.vessel_faces, vesColors,
+                               { transparent: false, opacity: 1.0 });
+    if (vesMesh) { root.add(vesMesh); layers.ves = vesMesh; }
+  } else if (data.vessel_pts && data.vessel_pts.length > 0) {
+    const vesPts = buildPoints(data.vessel_pts, 0xee2244, null, 2.5);
+    if (vesPts) { root.add(vesPts); layers.ves = vesPts; }
+  }
+
+  // Background (dark green, hidden by default)
+  const bgPts = buildPoints(data.bg_pts, 0x336644, null, 1.0);
+  if (bgPts) { bgPts.visible = false; root.add(bgPts); layers.bg = bgPts; }
+
+  // Bounding box wireframe
+  const boxGeo = new THREE.BoxGeometry(gs[0], gs[1], gs[2]);
+  const boxMat = new THREE.MeshBasicMaterial({ color: 0x1a1a3a, wireframe: true });
+  scene.add(new THREE.Mesh(boxGeo, boxMat));
+
+  return { scene, layers };
+}
+
+// ─── Stats panel ─────────────────────────────────────────────────────────────
+
+function pctSpan(val, ref) {
+  if (ref == null || ref === 0) return '';
+  const d = ((val - ref) / ref) * 100;
+  const s = d >= 0 ? '+' : '';
+  const cls = Math.abs(d) > 15 ? (d > 0 ? 'diff-hi' : 'diff-lo') : '';
+  return `<span class="${cls}">${s}${d.toFixed(1)}%</span>`;
+}
+
+function renderStats(elId, data, refData, label) {
+  const s  = data.stats;
+  const rs = refData?.stats;
+  const fmt = (v, d = 0) => v == null ? '—' :
+      (d > 0 ? (+v).toFixed(d) : Math.round(v).toLocaleString());
+  const row = (lbl, val, ref) => `
+    <div class="stat-row">
+      <span class="stat-label">${lbl}</span>
+      <span class="stat-val">${fmt(val)} ${rs ? pctSpan(val, ref) : ''}</span>
+    </div>`;
+  document.getElementById(elId).innerHTML = `
+    <h3>${label}</h3>
+    ${row('Neurons', s.n_neurons, rs?.n_neurons)}
+    ${row('Mean soma (vox)', s.mean_soma_size, rs?.mean_soma_size)}
+    ${row('Mean nuc (vox)', s.mean_nuc_size, rs?.mean_nuc_size)}
+    ${row('Soma mesh faces', s.soma_mesh_faces, rs?.soma_mesh_faces)}
+    ${row('Vessel mesh faces', s.vessel_mesh_faces, rs?.vessel_mesh_faces)}
+    ${row('Vessel voxels', s.vessel_voxels, rs?.vessel_voxels)}
+    ${row('Apical voxels', s.apical_count, rs?.apical_count)}
+    ${row('BG processes', s.n_bg_proc, rs?.n_bg_proc)}
+    <div class="stat-row">
+      <span class="stat-label">Fluor coverage</span>
+      <span class="stat-val">${(s.fluor_fraction * 100).toFixed(1)}% ${rs ? pctSpan(s.fluor_fraction, rs.fluor_fraction) : ''}</span>
+    </div>
+    <div class="stat-row">
+      <span class="stat-label">Fluor mean</span>
+      <span class="stat-val">${(+s.fluor_mean).toFixed(4)} ${rs ? pctSpan(s.fluor_mean, rs.fluor_mean) : ''}</span>
+    </div>`;
+}
+
+// ─── Main ─────────────────────────────────────────────────────────────────────
+
+async function fetchJSON(url, p0, p1) {
+  document.getElementById('load-msg').textContent = `Fetching ${url.split('/').pop()}...`;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(
+    `HTTP ${res.status} — ${url}\n\nServe files with:\n  python -m http.server 8080\nthen open http://localhost:8080/viewer_phase1_mesh.html`
+  );
+  const total = +res.headers.get('Content-Length') || 0;
+  const reader = res.body.getReader();
+  const chunks = []; let loaded = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value); loaded += value.length;
+    if (total) document.getElementById('prog-fill').style.width =
+      (p0 + (loaded / total) * (p1 - p0)) + '%';
+  }
+  document.getElementById('prog-fill').style.width = p1 + '%';
+  document.getElementById('load-msg').textContent = `Parsing ${url.split('/').pop()}...`;
+  return JSON.parse(await new Blob(chunks).text());
+}
+
+async function main() {
+  let mData, pData;
+  try {
+    mData = await fetchJSON('matlab_phase1_mesh.json', 0, 45);
+    pData = await fetchJSON('python_phase1_mesh.json', 45, 88);
+  } catch (e) {
+    document.getElementById('load-err').textContent = e.message;
+    document.getElementById('load-msg').textContent = 'Failed.';
+    document.getElementById('prog-fill').style.background = '#f44';
+    return;
+  }
+
+  document.getElementById('load-msg').textContent = 'Building 3D scenes...';
+  document.getElementById('prog-fill').style.width = '92%';
+
+  const { scene: mScene, layers: mLayers } = buildScene(mData);
+  const { scene: pScene, layers: pLayers } = buildScene(pData);
+
+  // ── Renderer ──
+  const canvas    = document.getElementById('canvas');
+  const container = document.getElementById('canvas-container');
+  const renderer  = new THREE.WebGLRenderer({ canvas, antialias: true });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  renderer.shadowMap.enabled = false;
+  renderer.autoClear = false;
+
+  // ── Cameras ──
+  const gs   = mData.grid_shape;
+  const dist = Math.max(...gs) * 1.5;
+  function makeCamera() {
+    const cam = new THREE.PerspectiveCamera(45, 1, 1, dist * 5);
+    cam.position.set(dist * 0.55, -dist * 0.4, dist * 0.7);
+    cam.lookAt(0, 0, 0);
+    return cam;
+  }
+  const cam1 = makeCamera(), cam2 = makeCamera();
+
+  // ── OrbitControls on half-width overlay divs ──
+  const ov1 = document.getElementById('overlay-left');
+  const ov2 = document.getElementById('overlay-right');
+  const ctrl1 = new OrbitControls(cam1, ov1);
+  const ctrl2 = new OrbitControls(cam2, ov2);
+  for (const c of [ctrl1, ctrl2]) {
+    c.enableDamping = true; c.dampingFactor = 0.07; c.zoomSpeed = 1.2;
+  }
+
+  // Sync cameras
+  let syncing = false;
+  function sync(src, sc, dst, dc) {
+    if (syncing) return; syncing = true;
+    dst.position.copy(src.position);
+    dst.quaternion.copy(src.quaternion);
+    dc.target.copy(sc.target);
+    dc.update();
+    syncing = false;
+  }
+  ctrl1.addEventListener('change', () => sync(cam1, ctrl1, cam2, ctrl2));
+  ctrl2.addEventListener('change', () => sync(cam2, ctrl2, cam1, ctrl1));
+
+  // ── Resize ──
+  function resize() {
+    const w = container.clientWidth, h = container.clientHeight;
+    renderer.setSize(w, h);
+    const hw = Math.floor(w / 2);
+    for (const cam of [cam1, cam2]) { cam.aspect = hw / h; cam.updateProjectionMatrix(); }
+  }
+  resize();
+  window.addEventListener('resize', resize);
+
+  // ── Visibility toggles ──
+  function bindToggle(id, key) {
+    const el = document.getElementById(id);
+    function apply(v) {
+      if (mLayers[key]) mLayers[key].visible = v;
+      if (pLayers[key]) pLayers[key].visible = v;
+    }
+    apply(el.checked);
+    el.addEventListener('change', () => apply(el.checked));
+  }
+  bindToggle('chk-soma',   'soma');
+  bindToggle('chk-nuc',    'nuc');
+  bindToggle('chk-dend',   'dend');
+  bindToggle('chk-apical', 'apical');
+  bindToggle('chk-ves',    'ves');
+  bindToggle('chk-bg',     'bg');
+
+  // Soma opacity slider
+  document.getElementById('sl-opacity').addEventListener('input', e => {
+    const v = +e.target.value / 100;
+    for (const m of [mLayers.soma, pLayers.soma]) {
+      if (!m) continue;
+      m.material.transparent = v < 1.0;
+      m.material.opacity = v;
+      m.material.depthWrite = v >= 1.0;
+      m.material.needsUpdate = true;
+    }
+  });
+
+  // ── Stats ──
+  renderStats('stats-matlab', mData, pData, 'MATLAB');
+  renderStats('stats-python', pData, mData, 'Python');
+
+  // ── Render loop ──
+  function animate() {
+    requestAnimationFrame(animate);
+    ctrl1.update(); ctrl2.update();
+    const w = container.clientWidth, h = container.clientHeight;
+    const hw = Math.floor(w / 2);
+    renderer.clear();
+    renderer.setScissorTest(true);
+    renderer.setViewport(0,  0, hw,     h); renderer.setScissor(0,  0, hw,     h); renderer.render(mScene, cam1);
+    renderer.setViewport(hw, 0, w - hw, h); renderer.setScissor(hw, 0, w - hw, h); renderer.render(pScene, cam2);
+    renderer.setScissorTest(false);
+  }
+
+  document.getElementById('prog-fill').style.width = '100%';
+  document.getElementById('load-msg').textContent  = 'Done!';
+  setTimeout(() => document.getElementById('loading').style.display = 'none', 250);
+  animate();
+}
+
+main().catch(e => {
+  document.getElementById('load-err').textContent = String(e);
+  document.getElementById('load-msg').textContent = 'Error.';
+});
+</script>
+</body>
+</html>
