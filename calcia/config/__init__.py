@@ -7,6 +7,10 @@ from .params import (
     DendParams,
     BgParams,
     AxonParams,
+    PsfParams,
+    TpmParams,
+    SpikeParams,
+    CalciumParams,
 )
 
 __all__ = [
@@ -16,4 +20,8 @@ __all__ = [
     "DendParams",
     "BgParams",
     "AxonParams",
+    "PsfParams",
+    "TpmParams",
+    "SpikeParams",
+    "CalciumParams",
 ]

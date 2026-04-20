@@ -268,3 +268,293 @@ class AxonParams:
     N_proc: int = 10
     l: float = 25.0
     rho: float = 0.1
+
+
+@dataclass
+class PsfParams:
+    """
+    Point-spread function and optical propagation parameters.
+
+    Corresponds to MATLAB: check_psf_params.m
+
+    Attributes:
+        na: Numerical aperture of the excitation beam.
+        obj_na: Numerical aperture of the objective lens (collection cone).
+        n: Refractive index of the propagation medium (brain tissue).
+        n_diff: Refractive index shift from blood vessels relative to tissue.
+        lambda_um: Two-photon excitation wavelength in microns.
+            Named lambda_um to avoid conflict with Python keyword ``lambda``.
+        obj_fl: Objective focal length in mm.
+        ss: Subsampling factor for Fresnel propagation relative to vres.
+        sampling: Spatial sampling period for illumination mask (um).
+        psf_sz: (X, Y, Z) size of the simulated PSF volume in um.
+        prop_sz: Fresnel propagation chunk length outside PSF volume (um).
+        blur: Lateral PSF blurring sigma in um (aberration model).
+        scatter_sz: Scattering object sizes in um.
+        scatter_wt: Scattering weights (same length as scatter_sz).
+        zernike_wt: 11-element Zernike aberration weights (in wavelengths).
+        tail_length: Distance from PSF edge to estimate tail weight (um).
+        psf_type: PSF type. 'gaussian' is the only supported type in this port.
+        scaling: Scaling type. 'two-photon' applies intensity^2.
+        hemo_abs: Hemoglobin absorbance factor for collection mask.
+            Stored as 0.00674 * log(10) to match MATLAB hemoabs field.
+            Usage: ``np.power(10, -col / vres * hemo_abs)``.
+        prop_crop: If True, crop propagation volume to beam extent.
+        fast_mask: If True, compute mask at lower resolution then upsample.
+        fm_sampling: Fast-mask coarse spatial sampling (um).
+        fm_fine_samp: Fast-mask fine subsampling factor.
+        fm_ss: Fast-mask Fresnel propagation subsampling.
+    """
+    na: float = 0.6
+    obj_na: float = 0.8
+    n: float = 1.35
+    n_diff: float = 0.02
+    lambda_um: float = 0.92
+    obj_fl: float = 4.5
+    ss: int = 2
+    sampling: float = 50.0
+    psf_sz: Tuple[float, float, float] = (20.0, 20.0, 50.0)
+    prop_sz: float = 10.0
+    blur: float = 3.0
+    scatter_sz: Tuple[float, ...] = (0.51, 1.56, 4.52, 14.78)
+    scatter_wt: Tuple[float, ...] = (0.57, 0.29, 0.19, 0.15)
+    zernike_wt: Tuple[float, ...] = (0., 0., 0., 0., 0.1, 0., 0., 0., 0., 0., 0.12)
+    tail_length: float = 50.0
+    psf_type: str = "gaussian"
+    scaling: str = "two-photon"
+    hemo_abs: float = field(default_factory=lambda: 0.00674 * math.log(10))
+    prop_crop: bool = True
+    fast_mask: bool = True
+    fm_sampling: float = 10.0
+    fm_fine_samp: int = 2
+    fm_ss: int = 1
+
+
+@dataclass
+class TpmParams:
+    """
+    Two-photon microscope signal scaling parameters.
+
+    Corresponds to MATLAB: check_tpm_params.m
+
+    Attributes:
+        nidx: Refractive index of the immersion medium (water = 1.33).
+        nac: Objective collection numerical aperture.
+        phi: Collection efficiency (solid angle * transmission * QE).
+            Computed from nac/nidx if None.
+        eta: Fluorophore quantum yield (eGFP estimate).
+        conc: Fluorophore concentration in uM.
+        delta: Two-photon absorption cross-section in GM (Goeppert-Mayer).
+        gp: Pulse-shape temporal coherence factor (sech pulse = 0.588).
+        f: Laser repetition rate in MHz.
+        tau: Laser pulse width in fs.
+        pavg: Average laser power in mW.
+        lambda_um: Excitation wavelength in um.
+            Named lambda_um to avoid conflict with Python keyword ``lambda``.
+    """
+    nidx: float = 1.33
+    nac: float = 0.8
+    phi: Optional[float] = None
+    eta: float = 0.6
+    conc: float = 10.0
+    delta: float = 2.0
+    gp: float = 0.588
+    f: float = 80.0
+    tau: float = 150.0
+    pavg: float = 40.0
+    lambda_um: float = 0.92
+
+    def __post_init__(self):
+        if self.phi is None:
+            sa = (1.0 - math.sqrt(1.0 - (self.nac / self.nidx) ** 2)) / 2.0
+            self.phi = 0.8 * sa * 0.4
+
+
+# ---------------------------------------------------------------------------
+# Phase 3: Time-trace generation parameters
+# ---------------------------------------------------------------------------
+
+#: Protein-specific defaults for CalciumParams.
+#: Keys are normalised protein names (lowercase, hyphens removed).
+_PROT_DEFAULTS: dict = {
+    "gcamp6f": {"ca_amp": 76.1251,  "t_on": 0.8535,   "t_off": 98.6173,  "ext_rate": 292.3},
+    "gcamp6":  {"ca_amp": 76.1251,  "t_on": 0.8535,   "t_off": 98.6173,  "ext_rate": 292.3},
+    "gcamp6s": {"ca_amp": 54.6943,  "t_on": 0.4526,   "t_off": 68.5461,  "ext_rate": 299.0833},
+    "gcamp7":  {"ca_amp": 230.917,  "t_on": 0.020137, "t_off": 3.1295,   "ext_rate": 265.73},
+    "gcamp3":  {"ca_amp": 0.05,     "t_on": 1.0,      "t_off": 1.0,      "ext_rate": 265.73},
+}
+
+
+@dataclass
+class SpikeParams:
+    """
+    Spike-train generation parameters.
+
+    Corresponds to MATLAB: check_spike_opts.m
+
+    Attributes:
+        K: Number of neurons to generate time traces for.
+        nt: Number of time-steps to simulate (at the output frame-rate).
+        rate: Average firing rate used as Gamma scale parameter.
+        dt: Time-step in seconds (1/frame-rate).
+        mu: Mean of the log-normal r.v. for AR spike amplitudes.
+        sig: Std-dev of the log-normal r.v. for AR spike amplitudes.
+        dyn_type: Calcium dynamics model.  Options: 'AR1', 'AR2', 'single',
+            'Ca_DE', 'double'.
+        rate_dist: Distribution for per-neuron firing rates.  Options:
+            'gamma', 'uniform'.
+        N_bg: Number of background/neuropil GP components (0 = none).
+        prot: Fluorescent protein name (used to set CalciumParams defaults).
+        alpha: Gamma shape parameter for the rate distribution.
+        burst_mean: Mean spikes per burst (Poisson).  0 disables bursting.
+        smod_flag: Spike model.  'hawkes' = correlated Hawkes process;
+            'poisson' = independent Poisson bursts.
+        p_off: Probability that a cell has zero expression.
+        selfact: Self-excitation scaling for the Hawkes diagonal.
+        min_mod: Modulation range (min_val, gamma_shape) for per-cell scaling.
+        spikeflag: If True, store raw spike counts in TimeTracesResult.
+        dendflag: If True, simulate dendrite fluorescence traces.
+        axonflag: If True, simulate axon/background fluorescence traces.
+        ensure_activity: If True, inject spikes into silent soma neurons
+            when the spike generation step produces very little activity.
+            This can happen when ``rate`` is low relative to the simulation
+            duration (``nt * dt``).  Default is False.
+        n_soma: Number of actual soma neurons among the K components.
+            When set, ``ensure_activity`` only injects spikes into the
+            first ``n_soma`` components (indices 0..n_soma-1), leaving
+            dendrite and background components untouched.  When None,
+            defaults to K (all components are treated as soma).
+        verbose: Verbosity level (0=silent, 1=progress, 2=detailed).
+    """
+    K: int = 30
+    nt: int = 1000
+    rate: float = 1e-3
+    dt: float = field(default_factory=lambda: 1 / 30)
+    mu: float = 0.0
+    sig: float = 1.0
+    dyn_type: str = "Ca_DE"
+    rate_dist: str = "gamma"
+    N_bg: int = 0
+    prot: str = "GCaMP6f"
+    alpha: float = 1.0
+    burst_mean: int = 10
+    smod_flag: str = "hawkes"
+    p_off: float = 0.2
+    selfact: float = 1.2
+    min_mod: Tuple[float, float] = (0.4, 2.53)
+    spikeflag: bool = True
+    dendflag: bool = True
+    axonflag: bool = True
+    ensure_activity: bool = False
+    n_soma: Optional[int] = None
+    verbose: int = 1
+
+
+@dataclass
+class CalciumParams:
+    """
+    Calcium dynamics simulation parameters.
+
+    Corresponds to MATLAB: check_cal_params.m
+
+    Protein-dependent fields (``ca_amp``, ``t_on``, ``t_off``, ``ext_rate``)
+    are resolved from ``_PROT_DEFAULTS`` in ``__post_init__`` when left as
+    ``None``.
+
+    Attributes:
+        prot_type: Fluorescent protein name (case-insensitive, hyphens OK).
+        ca_bind: Calcium binding ratio (dimensionless).
+        ca_rest: Resting calcium concentration in M.
+        ind_con: Indicator concentration in M.
+        ca_dis: Calcium dissociation constant in M.
+        ca_sat: Saturation parameter (0–1; 1 = no saturation).
+        sat_type: Dynamics model: 'Ca_DE', 'single', or 'double'.
+        dt: Internal simulation time-step in seconds (default 1/100 for 100 Hz).
+        a_bind: Binding rate constant.
+        a_ubind: Unbinding rate constant.
+        ca_amp: Double-exponential kernel amplitude (protein-specific default).
+        t_on: Rising time-constant of Ca²⁺ transient in s (protein-specific).
+        t_off: Falling time-constant of Ca²⁺ transient in s (protein-specific).
+        ext_rate: Ca²⁺ extrusion rate (protein-specific default).
+    """
+    prot_type: str = "gcamp6f"
+    ca_bind: float = 110.0
+    ca_rest: float = 50e-9
+    ind_con: float = 200e-6
+    ca_dis: float = 290e-9
+    ca_sat: float = 1.0
+    sat_type: str = "double"
+    dt: float = field(default_factory=lambda: 1 / 100)
+    a_bind: float = 3.5
+    a_ubind: float = 7.0
+    ca_amp: Optional[float] = None
+    t_on: Optional[float] = None
+    t_off: Optional[float] = None
+    ext_rate: Optional[float] = None
+
+    def __post_init__(self):
+        key = self.prot_type.lower().replace("-", "")
+        defaults = _PROT_DEFAULTS.get(key, _PROT_DEFAULTS["gcamp6f"])
+        if self.ca_amp is None:
+            self.ca_amp = defaults["ca_amp"]
+        if self.t_on is None:
+            self.t_on = defaults["t_on"]
+        if self.t_off is None:
+            self.t_off = defaults["t_off"]
+        if self.ext_rate is None:
+            self.ext_rate = defaults["ext_rate"]
+
+
+# ---------------------------------------------------------------------------
+# Phase 4: Scanning simulation parameters
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ScanParams:
+    """
+    Scanning simulation parameters.
+
+    Corresponds to MATLAB: check_scan_params.m
+
+    Attributes:
+        scan_buff: Edge buffer in granular pixels (cropped from each side).
+        motion: Enable tissue motion simulation.
+        scan_avg: Z-axis pre-summing factor for PSF convolution.
+        sfrac: Pixel binning / downsampling factor.
+        verbose: Verbosity level (0=silent, 1=summary, 2=detailed).
+        nuc_label: Nuclear label mode (0=off, >=1=on).
+        zoffset: Z-axis offset from centre in voxels.
+    """
+    scan_buff: int = 10
+    motion: bool = True
+    scan_avg: int = 2
+    sfrac: int = 2
+    verbose: int = 1
+    nuc_label: int = 0
+    zoffset: int = 0
+
+
+@dataclass
+class NoiseParams:
+    """
+    PMT / electronics noise model parameters.
+
+    Corresponds to MATLAB: check_noise_params.m
+
+    Attributes:
+        mu: Mean measurement increase per photon.
+        mu0: Electronics DC offset.
+        sigma: Variance increase per photon.
+        sigma0: Electronics baseline variance.
+        darkcount: Dark counts + autofluorescence rate.
+        bleedp: Pixel bleed probability.
+        bleedw: Pixel bleed max amplitude (fraction).
+    """
+    mu: float = 100.0
+    mu0: float = 0.0
+    sigma: float = 2300.0
+    sigma0: float = 2.7
+    darkcount: float = 0.05
+    bleedp: float = 0.3
+    bleedw: float = 0.4
