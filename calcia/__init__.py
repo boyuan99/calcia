@@ -12,3 +12,12 @@ from .io import export_pipeline_output, import_pipeline_output
 
 # Main pipeline entry point
 from .pipeline import NeuralVolumeOutput, simulate_neural_volume
+
+# Phase 2: optical propagation
+from .optics import OpticalPropagationResult, simulate_optical_propagation
+
+# Phase 3: time-trace generation
+from .traces import TimeTracesResult, generate_time_traces
+
+# Phase 4: scanning simulation
+from .scanning import ScanResult, scan_volume

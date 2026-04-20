@@ -16,9 +16,11 @@ from .config.params import (
     BgParams,
     DendParams,
     NeuronParams,
+    PsfParams,
     VascParams,
     VolumeParams,
 )
+from .optics.psf import gaussian_beam_size
 from .volume.background import (
     AxonResult,
     BgDendriteResult,
@@ -78,6 +80,7 @@ def simulate_neural_volume(
     dend_params: Optional[DendParams] = None,
     bg_params: Optional[BgParams] = None,
     axon_params: Optional[AxonParams] = None,
+    psf_params: Optional[PsfParams] = None,
     *,
     seed: Optional[int] = None,
     verbose: Optional[int] = None,
@@ -102,6 +105,8 @@ def simulate_neural_volume(
         dend_params: Dendrite parameters. Uses defaults if None.
         bg_params: Background dendrite parameters. Uses defaults if None.
         axon_params: Axon parameters. Uses defaults if None.
+        psf_params: PSF parameters. Used to compute vasc_sz (the extended
+            domain for blood vessel generation). Uses defaults if None.
         seed: Random seed for reproducibility. If None, no seed is set.
         verbose: Verbosity override (0=silent, 1=progress, 2=detailed).
             If None, uses vol_params.verbose.
@@ -131,6 +136,8 @@ def simulate_neural_volume(
         bg_params = BgParams()
     if axon_params is None:
         axon_params = AxonParams()
+    if psf_params is None:
+        psf_params = PsfParams()
 
     if verbose is not None:
         vol_params.verbose = verbose
@@ -151,6 +158,29 @@ def simulate_neural_volume(
               f"N_den={vol_params.N_den}, "
               f"N_bg={vol_params.N_bg}")
         print("=" * 60)
+
+    # ----------------------------------------------------------------
+    # Compute vasc_sz: extended domain for blood vessel generation.
+    # MATLAB: vasc_sz = gaussianBeamSize(psf_params, vol_depth + vol_sz(3)/2)
+    #                   + vol_sz + [0,0,1]*vol_depth
+    # ----------------------------------------------------------------
+    if vol_params.vasc_sz is None:
+        beam_ext = gaussian_beam_size(
+            psf_params,
+            vol_params.vol_depth + vol_params.vol_sz[2] / 2,
+        )
+        vasc_sz = tuple(
+            int(np.ceil(b + s + d))
+            for b, s, d in zip(
+                beam_ext,
+                vol_params.vol_sz,
+                (0, 0, vol_params.vol_depth),
+            )
+        )
+        vol_params.vasc_sz = vasc_sz
+
+    if v >= 1:
+        print(f"  Vasculature domain: {vol_params.vasc_sz} um")
 
     # ----------------------------------------------------------------
     # Step 1: Blood vessels

@@ -17,6 +17,20 @@ from ..config.params import VascParams, VolumeParams
 from ..algorithms.dijkstra import vessel_dijkstra
 
 
+def _vessel_domain(vol_params: VolumeParams) -> np.ndarray:
+    """Return the effective XYZ domain for vessel generation (in um).
+
+    If ``vol_params.vasc_sz`` is set, use it (expanded domain matching
+    MATLAB ``nv.vol_sz = vol_params.vasc_sz``).  Otherwise fall back to
+    ``vol_sz`` with ``vol_depth`` added to Z.
+    """
+    if vol_params.vasc_sz is not None:
+        return np.array(vol_params.vasc_sz, dtype=float)
+    vs = np.array(vol_params.vol_sz, dtype=float)
+    vs[2] += vol_params.vol_depth
+    return vs
+
+
 # =============================================================================
 # Data Structures
 # =============================================================================
@@ -415,12 +429,12 @@ def generate_source_nodes(
     Returns:
         List of source VesselNode objects.
     """
-    vol_sz = np.array(vol_params.vol_sz)
+    vdom = _vessel_domain(vol_params)
     node_params = vasc_params.node_params
 
-    # Calculate number of source nodes per edge
-    n_sources_x = max(1, int(np.ceil(vol_sz[0] / vasc_params.sourceFreq)))
-    n_sources_y = max(1, int(np.ceil(vol_sz[1] / vasc_params.sourceFreq)))
+    # Calculate number of source nodes per edge (using vessel domain)
+    n_sources_x = max(1, int(np.ceil(vdom[0] / vasc_params.sourceFreq)))
+    n_sources_y = max(1, int(np.ceil(vdom[1] / vasc_params.sourceFreq)))
 
     nodes = []
     node_idx = 0
@@ -430,10 +444,10 @@ def generate_source_nodes(
 
     # Generate source nodes on each edge
     edges = [
-        ('x_min', 0, vol_sz[1]),      # Left edge
-        ('x_max', 0, vol_sz[1]),      # Right edge
-        ('y_min', 0, vol_sz[0]),      # Bottom edge
-        ('y_max', 0, vol_sz[0]),      # Top edge
+        ('x_min', 0, vdom[1]),      # Left edge
+        ('x_max', 0, vdom[1]),      # Right edge
+        ('y_min', 0, vdom[0]),      # Bottom edge
+        ('y_max', 0, vdom[0]),      # Top edge
     ]
 
     for edge_name, coord_min, coord_max in edges:
@@ -451,13 +465,13 @@ def generate_source_nodes(
                 pos = np.array([0, coord, z_surface])
                 direction = np.array([1, 0, 0])
             elif edge_name == 'x_max':
-                pos = np.array([vol_sz[0], coord, z_surface])
+                pos = np.array([vdom[0], coord, z_surface])
                 direction = np.array([-1, 0, 0])
             elif edge_name == 'y_min':
                 pos = np.array([coord, 0, z_surface])
                 direction = np.array([0, 1, 0])
             else:  # y_max
-                pos = np.array([coord, vol_sz[1], z_surface])
+                pos = np.array([coord, vdom[1], z_surface])
                 direction = np.array([0, -1, 0])
 
             node = VesselNode(
@@ -500,7 +514,7 @@ def grow_major_vessels(
     Returns:
         VesselNetwork with surface vessel nodes and connections.
     """
-    vol_sz = np.array(vol_params.vol_sz)
+    vdom = _vessel_domain(vol_params)
     node_params = vasc_params.node_params
 
     if verbose >= 1:
@@ -520,8 +534,8 @@ def grow_major_vessels(
 
     all_nodes = list(source_nodes)
 
-    # 2D bounds for surface vessel growth
-    bounds_2d = (0, vol_sz[0], 0, vol_sz[1])
+    # 2D bounds for surface vessel growth (vessel domain)
+    bounds_2d = (0, vdom[0], 0, vdom[1])
 
     for source in source_nodes:
         direction = source.misc.get('direction', np.array([1, 0, 0]))[:2]
@@ -677,13 +691,12 @@ def grow_diving_vessels(
     Returns:
         Updated VesselNetwork with diving vessels.
     """
-    vol_sz = np.array(vol_params.vol_sz)
-    # Full tissue depth includes vol_depth (above imaging volume) + vol_sz[2]
-    full_depth = vol_params.vol_depth + vol_sz[2]
+    vdom = _vessel_domain(vol_params)
+    full_depth = vdom[2]
 
-    # Calculate number of diving vessels
+    # Calculate number of diving vessels (using vessel domain XY)
     n_diving = max(1, int(np.ceil(
-        vol_sz[0] * vol_sz[1] / (vasc_params.vesFreq[1] ** 2)
+        vdom[0] * vdom[1] / (vasc_params.vesFreq[1] ** 2)
     )))
 
     # Add noise to count
@@ -697,7 +710,7 @@ def grow_diving_vessels(
 
     dive_positions = pseudo_rand_sample_2d(
         n_samples=n_diving,
-        bounds=(0, vol_sz[0], 0, vol_sz[1]),
+        bounds=(0, vdom[0], 0, vdom[1]),
         exclusion_sigma=vasc_params.vesFreq[1] * 0.5,
         existing_points=existing_surface if len(existing_surface) > 0 else None,
     )
@@ -740,9 +753,9 @@ def grow_diving_vessels(
                 new_z
             ])
 
-            # Clamp to volume bounds
-            new_pos[0] = np.clip(new_pos[0], 0, vol_sz[0])
-            new_pos[1] = np.clip(new_pos[1], 0, vol_sz[1])
+            # Clamp to vessel domain bounds
+            new_pos[0] = np.clip(new_pos[0], 0, vdom[0])
+            new_pos[1] = np.clip(new_pos[1], 0, vdom[1])
 
             # Create node
             node = VesselNode(
@@ -796,12 +809,12 @@ def grow_capillaries(
     Returns:
         Updated VesselNetwork with capillaries.
     """
-    vol_sz = np.array(vol_params.vol_sz)
-    full_depth = vol_params.vol_depth + vol_sz[2]
+    vdom = _vessel_domain(vol_params)
+    full_depth = vdom[2]
 
-    # Calculate capillary density (using full depth volume)
+    # Calculate capillary density (using vessel domain volume)
     n_capillary = max(1, int(np.ceil(
-        vol_sz[0] * vol_sz[1] * full_depth / (vasc_params.vesFreq[2] ** 3)
+        vdom[0] * vdom[1] * full_depth / (vasc_params.vesFreq[2] ** 3)
     )))
 
     if verbose >= 1:
@@ -821,8 +834,8 @@ def grow_capillaries(
     existing_positions = np.array([n.pos for n in nodes])
 
     capillary_bounds = (
-        0, vol_sz[0],
-        0, vol_sz[1],
+        0, vdom[0],
+        0, vdom[1],
         vasc_params.depth_surf, full_depth
     )
 
@@ -1134,19 +1147,29 @@ def connections_to_volume(
     Returns:
         VesselNetwork with vessel_volume populated.
     """
-    img_vol_sz = tuple(int(s * vol_params.vres) for s in vol_params.vol_sz)
     vres = vol_params.vres
-    # Render into a full-depth volume (surface → bottom of imaging volume).
-    # Vessel positions use absolute depth (z=0 = tissue surface).
+    vdom = _vessel_domain(vol_params)
+
+    # Render into the vessel domain (may be larger than imaging volume
+    # when vasc_sz is set via gaussianBeamSize expansion).
+    render_sz = tuple(int(np.ceil(s * vres)) for s in vdom)
+
+    # Target (cropped) volume: vol_sz XY + (vol_depth + vol_sz[2]) Z
+    img_vol_sz = tuple(int(s * vres) for s in vol_params.vol_sz)
     z_offset_vox = int(vol_params.vol_depth * vres)
-    full_z_vox   = z_offset_vox + img_vol_sz[2]
-    full_vol_sz  = (img_vol_sz[0], img_vol_sz[1], full_z_vox)
+    crop_z = z_offset_vox + img_vol_sz[2]
+    crop_sz = (img_vol_sz[0], img_vol_sz[1], crop_z)
 
     if verbose >= 1:
-        print(f"  Rendering vessels to full-depth volume {full_vol_sz}, then cropping to imaging region...")
+        if render_sz != crop_sz:
+            print(f"  Rendering vessels to expanded volume {render_sz}, "
+                  f"then cropping to {crop_sz}...")
+        else:
+            print(f"  Rendering vessels to full-depth volume {render_sz}...")
 
-    # Initialize full-depth volume
-    vessel_volume = np.zeros(full_vol_sz, dtype=np.uint8)
+    # Initialize render volume
+    vessel_volume = np.zeros(render_sz, dtype=np.uint8)
+    full_vol_sz = render_sz  # used by draw_sphere_at bounds check
 
     # Vessel radii for different types (in micrometers, will convert to voxels)
     type_radii_um = {
@@ -1232,11 +1255,22 @@ def connections_to_volume(
         for loc in locs_voxels:
             draw_sphere_at(vessel_volume, loc, radius_voxels, full_vol_sz)
 
+    # Crop from render domain to target domain (MATLAB: simulatebloodvessels.m L200-204)
+    if render_sz != crop_sz:
+        x_off = (render_sz[0] - crop_sz[0]) // 2
+        y_off = (render_sz[1] - crop_sz[1]) // 2
+        z_off = (render_sz[2] - crop_sz[2]) // 2
+        vessel_volume = vessel_volume[
+            x_off : x_off + crop_sz[0],
+            y_off : y_off + crop_sz[1],
+            z_off : z_off + crop_sz[2],
+        ].copy()
+
     # Keep full-depth volume (matches MATLAB vol_out.neur_ves which includes surface region)
     network.vessel_volume = vessel_volume
 
     if verbose >= 1:
-        fill_pct = 100 * np.sum(vessel_volume) / np.prod(full_vol_sz)
+        fill_pct = 100 * np.sum(vessel_volume) / np.prod(crop_sz)
         imaging_vox = int(np.sum(vessel_volume[:, :, z_offset_vox:]))
         print(f"  Volume rendered: {fill_pct:.2f}% filled (full depth),"
               f" imaging region: {imaging_vox:,} voxels")
