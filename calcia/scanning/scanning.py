@@ -87,6 +87,21 @@ def scan_volume(
         Simulated movie, clean movie, and motion history.
     """
     # ------------------------------------------------------------------
+    # Widefield dispatch: if Phase 2 ran with imaging_mode='widefield',
+    # delegate to scan_widefield and leave the two-photon code path below
+    # untouched.
+    # ------------------------------------------------------------------
+    psf_params = opt_out.params.get("psf_params") if opt_out.params else None
+    if getattr(psf_params, "imaging_mode", "two-photon") == "widefield":
+        from .widefield import scan_widefield
+        return scan_widefield(
+            vol_out, opt_out, time_out,
+            scan_params=scan_params,
+            spike_params=spike_params,
+            seed=seed,
+        )
+
+    # ------------------------------------------------------------------
     # Default parameters
     # ------------------------------------------------------------------
     if scan_params is None:

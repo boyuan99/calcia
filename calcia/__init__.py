@@ -20,4 +20,7 @@ from .optics import OpticalPropagationResult, simulate_optical_propagation
 from .traces import TimeTracesResult, generate_time_traces
 
 # Phase 4: scanning simulation
-from .scanning import ScanResult, scan_volume
+from .scanning import ScanResult, scan_volume, scan_widefield
+
+# Widefield (single-photon) parameter classes
+from .config.params import CameraNoiseParams, WidefieldParams

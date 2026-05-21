@@ -1,7 +1,8 @@
 """
-Two-photon microscope signal scaling.
+Microscope signal scaling (two-photon and widefield one-photon).
 
-Port of MATLAB ``tpmSignalscale.m``.
+Port of MATLAB ``tpmSignalscale.m`` plus a widefield (single-photon)
+counterpart used by the camera-based imaging path.
 """
 
 from __future__ import annotations
@@ -10,7 +11,7 @@ import math
 from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
-    from ..config.params import PsfParams, TpmParams
+    from ..config.params import PsfParams, TpmParams, WidefieldParams
 
 
 def tpm_signal_scale(
@@ -67,3 +68,58 @@ def tpm_signal_scale(
         / (2.0 * f * tau * math.pi * lambda_m)
     )
     return float(ftavg)
+
+
+def widefield_signal_scale(wf_params: "WidefieldParams") -> float:
+    """Compute the per-fluorophore single-photon emission collection rate.
+
+    Linear (one-photon) counterpart to :func:`tpm_signal_scale`. The rate
+    scales linearly with excitation intensity (no I^2 term) and uses the
+    one-photon absorption cross-section sigma_abs instead of the two-photon
+    cross-section delta.
+
+    Formula::
+
+        rate_per_molecule = sigma_abs * I_exc                     # photons/s per fluorophore
+        F = phi * qe_det * omega * t_optics * rate_per_molecule * conc_uM
+
+    where I_exc is the excitation photon flux in photons / s / cm^2 and
+    ``conc_uM`` is used as a dimensionless scale factor (the simulated
+    fluorescence volume already encodes spatial molecule density, so we
+    do not multiply by Avogadro's number here).
+
+    Unit conventions:
+      - sigma_abs in cm^2 (native units for one-photon absorption).
+      - pavg in mW / mm^2 (Koehler illumination) -> photons / s / cm^2
+        via ``I = pavg * 1e-1 / E_photon`` (1 mW/mm^2 = 0.1 W/cm^2).
+      - conc in uM, used as a raw multiplier.
+
+    Args:
+        wf_params: Widefield parameters (see :class:`WidefieldParams`).
+
+    Returns:
+        Float signal scaling constant — photons per second per unit
+        fluorescence (dimensionless in the volume's normalized units).
+        Used as a multiplicative prefactor in
+        :func:`calcia.scanning.scan_widefield`.
+    """
+    sigma_abs = wf_params.sigma_abs                  # cm^2, as given
+    lambda_m = wf_params.lambda_ex_um * 1e-6         # um -> m
+    h = 6.626e-34                                    # Planck constant (J*s)
+    c = 3e8                                          # Speed of light (m/s)
+    e_photon = h * c / lambda_m                      # J per excitation photon
+    # mW/mm^2 -> W/cm^2: 1 mW/mm^2 = 1e-3 W / 1e-2 cm^2 = 1e-1 W/cm^2
+    i_exc = wf_params.pavg * 1e-1 / e_photon         # photons / s / cm^2
+
+    omega = wf_params.omega if wf_params.omega is not None else 0.0
+
+    f_rate = (
+        wf_params.phi
+        * wf_params.qe_det
+        * omega
+        * wf_params.t_optics
+        * sigma_abs
+        * i_exc
+        * wf_params.conc
+    )
+    return float(f_rate)

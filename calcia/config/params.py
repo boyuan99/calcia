@@ -299,6 +299,20 @@ class PsfParams:
         hemo_abs: Hemoglobin absorbance factor for collection mask.
             Stored as 0.00674 * log(10) to match MATLAB hemoabs field.
             Usage: ``np.power(10, -col / vres * hemo_abs)``.
+        scatter_length_um_wf: Widefield-only. Effective ONE-WAY tissue
+            scattering length at the widefield emission wavelength (um).
+            The round-trip excitation + emission attenuation for a source
+            at depth z BELOW THE VOLUME TOP is ``exp(-2*z / scatter_length_um_wf)``.
+            Depth is measured from z=0 at the top of the imaging volume
+            (where the imaging window sits flush against tissue); the
+            ``VolumeParams.vol_depth`` offset is NOT added — that field
+            is a 2P cranial-window concept for modelling extra overlying
+            tissue. Default 70 um reflects cortical mu_s' ~ 13-20 cm^-1
+            at 488-520 nm. Ignored when imaging_mode == "two-photon".
+        hemo_abs_wf: Widefield-only. Hemoglobin absorbance factor used by
+            the collection mask when imaging_mode == "widefield". Defaults
+            to ~30x the two-photon value to reflect HbO2 absorption at
+            520 nm vs 920 nm. Ignored when imaging_mode == "two-photon".
         prop_crop: If True, crop propagation volume to beam extent.
         fast_mask: If True, compute mask at lower resolution then upsample.
         fm_sampling: Fast-mask coarse spatial sampling (um).
@@ -322,7 +336,13 @@ class PsfParams:
     tail_length: float = 50.0
     psf_type: str = "gaussian"
     scaling: str = "two-photon"
+    imaging_mode: str = "two-photon"
+    lambda_em_um: float = 0.52
     hemo_abs: float = field(default_factory=lambda: 0.00674 * math.log(10))
+    scatter_length_um_wf: float = 70.0
+    hemo_abs_wf: float = field(
+        default_factory=lambda: 0.00674 * math.log(10) * 30.0
+    )
     prop_crop: bool = True
     fast_mask: bool = True
     fm_sampling: float = 10.0
@@ -368,6 +388,45 @@ class TpmParams:
         if self.phi is None:
             sa = (1.0 - math.sqrt(1.0 - (self.nac / self.nidx) ** 2)) / 2.0
             self.phi = 0.8 * sa * 0.4
+
+
+@dataclass
+class WidefieldParams:
+    """
+    Single-photon widefield signal-scaling parameters.
+
+    Counterpart of TpmParams for linear (one-photon) excitation with
+    camera-based detection.
+
+    Attributes:
+        phi: Fluorophore quantum yield (GFP ~ 0.6).
+        sigma_abs: Absorption cross-section in cm^2 (EGFP @ 488 nm ~ 3.8e-16).
+        conc: Fluorophore concentration in uM.
+        lambda_ex_um: Excitation wavelength in um (GFP ~ 0.488).
+        pavg: Excitation intensity in mW/mm^2 (Koehler uniform illumination).
+        na_col: Objective collection numerical aperture.
+        nidx: Refractive index of the immersion medium.
+        t_optics: Optical path transmission fraction.
+        qe_det: Camera quantum efficiency at emission wavelength.
+        omega: Fractional collection solid angle. Auto-computed from
+            na_col/nidx if None.
+    """
+    phi: float = 0.6
+    sigma_abs: float = 3.8e-16
+    conc: float = 10.0
+    lambda_ex_um: float = 0.488
+    pavg: float = 1.0
+    na_col: float = 0.8
+    nidx: float = 1.33
+    t_optics: float = 0.7
+    qe_det: float = 0.8
+    omega: Optional[float] = None
+
+    def __post_init__(self):
+        if self.omega is None:
+            self.omega = 0.5 * (
+                1.0 - math.sqrt(1.0 - (self.na_col / self.nidx) ** 2)
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -558,3 +617,30 @@ class NoiseParams:
     darkcount: float = 0.05
     bleedp: float = 0.3
     bleedw: float = 0.4
+
+
+@dataclass
+class CameraNoiseParams:
+    """
+    sCMOS / CCD camera noise model parameters.
+
+    Widefield counterpart of NoiseParams. Replaces the PMT lognormal-gain
+    chain with a Poisson + read-noise model.
+
+    Attributes:
+        qe: Camera quantum efficiency. Set to 1.0 if QE is already folded
+            into widefield_signal_scale.
+        dark_rate: Dark current in electrons / pixel / second.
+        t_exp: Exposure time in seconds (~0.033 for 30 fps).
+        read_noise: Read noise in electrons rms.
+        gain_e_per_adu: Conversion gain (electrons per ADU).
+        bit_depth: ADC bit depth (output is clipped to [0, 2**bit_depth - 1]).
+        pixel_gain_sigma: Fixed-pattern PRNU sigma. Set to 0 to disable.
+    """
+    qe: float = 0.8
+    dark_rate: float = 0.3
+    t_exp: float = 0.033
+    read_noise: float = 1.6
+    gain_e_per_adu: float = 1.0
+    bit_depth: int = 16
+    pixel_gain_sigma: float = 0.01

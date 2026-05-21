@@ -84,6 +84,12 @@ def simulate_optical_propagation(
 
     v = vol_params.verbose if verbose is None else verbose
 
+    if getattr(psf_params, "imaging_mode", "two-photon") == "widefield":
+        from .widefield import simulate_optical_propagation_widefield
+        return simulate_optical_propagation_widefield(
+            vol_params, psf_params, vol_out, verbose=v,
+        )
+
     if v >= 1:
         print("=" * 60)
         print("simulate_optical_propagation  (Phase 2)")

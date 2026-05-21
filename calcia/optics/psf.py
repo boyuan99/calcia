@@ -47,8 +47,9 @@ def gaussian_psf_na(
     mat_size: Tuple[int, int, int],
     theta: float = 0.0,
     nidx: float = 1.33,
+    scaling: str = "two-photon",
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Compute a two-photon Gaussian PSF volume from numerical aperture.
+    """Compute a Gaussian PSF volume from numerical aperture.
 
     Port of MATLAB ``gaussian_psf_na.m``.
 
@@ -60,19 +61,24 @@ def gaussian_psf_na(
       4. Apply optional tilt rotation in the x-z plane (theta in degrees).
       5. ``intensity = exp(-2*pi*nidx*(x^2+y^2) / (zr*lambda*(1+(z/zr)^2)))
                         / (1+(z/zr)^2)``
-      6. ``psf = intensity^2``  (two-photon)
+      6. Depending on ``scaling``: two-photon squares the intensity (I^2);
+         widefield / one-photon uses the linear intensity (I).
 
     Args:
-        na: Excitation numerical aperture.
-        lambda_um: Excitation wavelength in microns.
+        na: Excitation (or detection, for widefield) numerical aperture.
+        lambda_um: Wavelength in microns. Excitation wavelength for
+            two-photon, emission wavelength for widefield.
         sampling: (dx, dy, dz) voxel spacing in um for each axis.
         mat_size: (Nx, Ny, Nz) output array size in voxels.
         theta: Beam tilt angle in degrees (rotation in the x-z plane).
         nidx: Refractive index of the medium.
+        scaling: ``"two-photon"`` squares intensity (default, preserves
+            legacy behaviour). ``"widefield"`` or ``"one-photon"`` returns
+            the linear intensity (emission/detection PSF).
 
     Returns:
         Tuple ``(psf, x, y, z)`` where:
-          - psf: float32 array of shape ``(Nx, Ny, Nz)`` — two-photon PSF.
+          - psf: float32 array of shape ``(Nx, Ny, Nz)``.
           - x: 1D float64 x-coordinates in um.
           - y: 1D float64 y-coordinates in um.
           - z: 1D float64 z-coordinates in um.
@@ -120,8 +126,15 @@ def gaussian_psf_na(
         1.0 + (zg2 / zr) ** 2
     )
 
-    # Two-photon: square the intensity
-    psf = (intensity ** 2).astype(np.float32)
+    if scaling == "two-photon":
+        psf = (intensity ** 2).astype(np.float32)
+    elif scaling in ("widefield", "one-photon"):
+        psf = intensity.astype(np.float32)
+    else:
+        raise ValueError(
+            f"Unknown scaling '{scaling}': expected 'two-photon', "
+            f"'widefield', or 'one-photon'"
+        )
 
     return psf, x, y, z
 

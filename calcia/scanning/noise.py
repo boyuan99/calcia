@@ -1,7 +1,9 @@
 """
 Noise models for scanning simulation.
 
-Port of MATLAB: ``PoissonGaussNoiseModel.m``, ``pixel_bleed.m``.
+Port of MATLAB: ``PoissonGaussNoiseModel.m``, ``pixel_bleed.m``. Also
+provides :func:`camera_noise`, the sCMOS/CCD counterpart used by the
+widefield imaging path.
 """
 
 from __future__ import annotations
@@ -11,7 +13,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 if TYPE_CHECKING:
-    from ..config.params import NoiseParams
+    from ..config.params import CameraNoiseParams, NoiseParams
 
 
 def poisson_gauss_noise(
@@ -120,3 +122,70 @@ def pixel_bleed(
 
     frame_out = frame - x_bleed * frame + shifted_bleed * shifted_frame
     return frame_out.astype(np.float32)
+
+
+def camera_noise(
+    clean: np.ndarray,
+    cam_params: "CameraNoiseParams",
+    rng: np.random.Generator,
+) -> np.ndarray:
+    """Apply an sCMOS/CCD camera noise model to a clean image.
+
+    Widefield counterpart to :func:`poisson_gauss_noise`. Replaces the PMT
+    lognormal-gain chain with a Poisson + read-noise model:
+
+    1. **Photon shot noise**: ``signal_e = Poisson(qe * clean)``.
+    2. **Dark current**: ``dark_e = Poisson(dark_rate * t_exp)`` per pixel.
+    3. **PRNU**: multiply ``(signal_e + dark_e)`` by a per-pixel gain
+       drawn once as ``Normal(1, pixel_gain_sigma)`` (skipped when sigma<=0).
+    4. **Read noise**: add ``Normal(0, read_noise)`` per pixel.
+    5. **ADC**: divide by ``gain_e_per_adu``, round, clip to
+       ``[0, 2**bit_depth - 1]``.
+
+    Parameters
+    ----------
+    clean : np.ndarray
+        Non-negative photon-rate image (2-D). Units: photons per exposure.
+    cam_params : CameraNoiseParams
+        Camera noise configuration.
+    rng : np.random.Generator
+        Random number generator.
+
+    Returns
+    -------
+    adu : np.ndarray
+        Noisy digitized image (float32 ADU, shape matches *clean*).
+    """
+    qe = cam_params.qe
+    dark_rate = cam_params.dark_rate
+    t_exp = cam_params.t_exp
+    read_noise = cam_params.read_noise
+    gain = cam_params.gain_e_per_adu
+    prnu_sigma = cam_params.pixel_gain_sigma
+    max_adu = float(2 ** cam_params.bit_depth - 1)
+
+    # Stage 1: photon shot noise (QE folded in)
+    signal_e = rng.poisson(np.maximum(qe * clean, 0.0)).astype(np.float64)
+
+    # Stage 2: dark current
+    dark_mean = dark_rate * t_exp
+    if dark_mean > 0:
+        dark_e = rng.poisson(dark_mean, size=clean.shape).astype(np.float64)
+    else:
+        dark_e = 0.0
+
+    total_e = signal_e + dark_e
+
+    # Stage 3: PRNU (fixed-pattern per-pixel gain)
+    if prnu_sigma > 0:
+        prnu = rng.normal(1.0, prnu_sigma, size=clean.shape)
+        total_e = total_e * prnu
+
+    # Stage 4: Gaussian read noise (in electrons)
+    if read_noise > 0:
+        total_e = total_e + rng.normal(0.0, read_noise, size=clean.shape)
+
+    # Stage 5: ADC
+    adu = np.round(total_e / gain)
+    adu = np.clip(adu, 0.0, max_adu).astype(np.float32)
+    return adu
