@@ -974,11 +974,13 @@ def grow_neuron_dendrites(
         except ValueError:
             pass  # Shape mismatch edge case at volume borders
 
-        # Reshape to (prod(dims), 6) with Fortran-order spatial flattening
+        # Reshape to (prod(dims), 6) with Fortran-order spatial flattening.
+        # F-order spatial flatten == transpose spatial axes to (z, y, x) then
+        # C-order reshape; one contiguous copy instead of six strided ones.
         n_coarse = int(np.prod(dims))
-        cost_flat = np.zeros((n_coarse, 6), dtype=np.float32)
-        for di in range(6):
-            cost_flat[:, di] = cost_6dir[:, :, :, di].ravel(order='F')
+        cost_flat = np.ascontiguousarray(
+            cost_6dir.transpose(2, 1, 0, 3)
+        ).reshape(n_coarse, 6)
 
         # Run coarse Dijkstra (6-directional)
         _, path_from_c = dendrite_dijkstra_6dir(
@@ -1078,12 +1080,11 @@ def grow_neuron_dendrites(
         cost_fine_6dir[:, :, -1, 5] = np.inf
 
         # Reshape to (prod(fdims), 6) with Fortran-order spatial flattening
+        # (transpose spatial axes + single contiguous copy; see coarse grid).
         n_fine = int(np.prod(fdims))
-        cost_fine_flat = np.zeros((n_fine, 6), dtype=np.float32)
-        for di in range(6):
-            cost_fine_flat[:, di] = cost_fine_6dir[:, :, :, di].ravel(
-                order='F'
-            )
+        cost_fine_flat = np.ascontiguousarray(
+            cost_fine_6dir.transpose(2, 1, 0, 3)
+        ).reshape(n_fine, 6)
 
         # Run fine Dijkstra (6-directional)
         _, path_from_f = dendrite_dijkstra_6dir(
@@ -1458,11 +1459,12 @@ def grow_apical_dendrites(
         )
         cost_6dir += penalty[..., np.newaxis]
 
-        # Flatten with Fortran-order and run Dijkstra
+        # Flatten with Fortran-order and run Dijkstra (transpose spatial axes
+        # + single contiguous copy; see grow_neuron_dendrites coarse grid).
         n_coarse = int(np.prod(dims))
-        cost_flat = np.zeros((n_coarse, 6), dtype=np.float32)
-        for di in range(6):
-            cost_flat[:, di] = cost_6dir[:, :, :, di].ravel(order='F')
+        cost_flat = np.ascontiguousarray(
+            cost_6dir.transpose(2, 1, 0, 3)
+        ).reshape(n_coarse, 6)
 
         _, path_from_c = dendrite_dijkstra_6dir(
             cost_flat, tuple(dims), tuple(root_coarse)
@@ -1553,11 +1555,12 @@ def grow_apical_dendrites(
         if np.any(np.isinf(ML[tuple(rootL_fine)])):
             ML[tuple(rootL_fine)] = 1.0
 
-        # Flatten and run fine Dijkstra
+        # Flatten and run fine Dijkstra (transpose spatial axes + single
+        # contiguous copy; see grow_neuron_dendrites coarse grid).
         n_fine = int(np.prod(fdims))
-        cost_fine_flat = np.zeros((n_fine, 6), dtype=np.float32)
-        for di in range(6):
-            cost_fine_flat[:, di] = ML[:, :, :, di].ravel(order='F')
+        cost_fine_flat = np.ascontiguousarray(
+            ML.transpose(2, 1, 0, 3)
+        ).reshape(n_fine, 6)
 
         _, path_from_f = dendrite_dijkstra_6dir(
             cost_fine_flat, tuple(fdims), tuple(rootL_fine), use_numba=True

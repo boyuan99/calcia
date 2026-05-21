@@ -269,7 +269,8 @@ def dendrite_dijkstra_6dir(
             f"(prod(dims)={n_voxels}, 6)"
         )
 
-    cost_6dir = cost_6dir.astype(np.float32)
+    if cost_6dir.dtype != np.float32:
+        cost_6dir = cost_6dir.astype(np.float32)
 
     # Fortran-order linear index for root
     root_idx = root[0] + root[1] * dims[0] + root[2] * dims[0] * dims[1]
