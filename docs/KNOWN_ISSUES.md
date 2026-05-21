@@ -63,6 +63,100 @@ nodes, then connect them via the existing `connect_vessel_nodes()`.
 
 ---
 
+## Phase 1 — Biological Model Limitations
+
+These are limitations of the underlying NAOMi modelling approach (inherited
+from the original MATLAB implementation), not MATLAB-parity deviations. They
+affect the biological realism of the simulation rather than its fidelity to
+the reference port.
+
+### Issue M1: No blood flow simulation inside vessels
+
+**Status:** Deferred — requires substantial model extension
+**Priority:** Low for most use cases; **High** if the simulator is used to
+study hemodynamic imaging, optical absorption modulation, or flow-induced
+motion artifacts.
+
+**Current behavior:**
+The vasculature is modeled as a **static geometric scaffold**. Vessels
+contribute to the image only through:
+- Fluorescence exclusion (vessels are dark holes in the neural volume)
+- Hemoglobin absorption as a fixed attenuation
+  (`exp(-x/vres * hemo_abs)` in [calcia/optics/signal.py](../calcia/optics/signal.py))
+
+There is no notion of:
+- Blood velocity / flow direction along vessel segments
+- Pulsatile variation (heartbeat, respiration-synchronized modulation)
+- Red blood cell transit (which produces measurable shadow flicker in
+  real two-photon recordings — the basis of line-scan blood flow imaging)
+- Blood oxygenation changes (HbO/HbR ratio) tied to neural activity — so
+  the simulator cannot generate intrinsic optical signal (IOS) or
+  hemodynamic response function (HRF) phenomena
+
+**What a fix would entail:**
+1. **Flow graph**: assign a directed flow rate to every vessel segment
+   (consistent with Murray's law and boundary conditions at surface sources/drains)
+2. **Time-varying absorption**: modulate `hemo_abs` per segment over time
+   based on local velocity × cross-section + pulsatile component
+3. **RBC shot noise**: optionally simulate discrete RBC passage for line-scan
+   blood flow applications (stochastic transits modulating local absorption)
+4. **Neurovascular coupling**: optional link between neural activity and
+   local flow changes to produce HRF-like signals
+
+**Impact if left unfixed:**
+- Perfectly acceptable for calcium imaging studies of neural dynamics
+  (the dominant NAOMi use case)
+- Unsuitable for studies of blood flow imaging, BOLD/IOS signal generation,
+  or vascular artifact characterization in two-photon data
+
+---
+
+### Issue M2: Neural volume component overlap may be too permissive
+
+**Status:** Needs verification — observation reported during pipeline runs,
+root cause not yet pinned down
+**Priority:** Medium — affects biological realism of the neural volume
+
+**Observed symptom:**
+When rendering the combined neural volume, components (soma, dendrites,
+apical dendrites, background dendrites, axons) appear to overlap with each
+other at a level that does not match real cortical tissue, where
+cells physically occupy disjoint volumes.
+
+**Suspected contributing factors (to investigate):**
+- `sample_dense_neurons` enforces a minimum inter-soma distance, but the
+  check is on **soma centers** — dendrites from adjacent neurons may pass
+  through each other's soma shells without being rejected
+- `grow_neuron_dendrites` (Dijkstra-based) uses a cost volume that discourages
+  growing into existing structures but does not make it hard-forbidden; the
+  random-weight perturbation can push paths through occupied voxels
+- `generate_bg_dendrites` and `generate_axons` random walks likely do not
+  read back from the running neural volume — so they can trace through
+  anything already placed
+
+**What needs to be done:**
+1. **Quantify the problem**: add a diagnostic that measures, per voxel type,
+   the fraction of voxels occupied by more than one component — report as a
+   histogram (0, 1, 2, 3+ owners per voxel)
+2. **Compare against MATLAB**: run the same measurement on MATLAB output to
+   determine whether this is a port-introduced regression or a shared NAOMi
+   limitation
+3. **If port-introduced**: tighten cost_volume penalties / add occupancy checks
+   in dendrite / background / axon generators
+4. **If shared with MATLAB**: document as a model limitation; a principled fix
+   would use hard occupancy volumes (similar to vessel masks) rather than
+   soft cost penalties
+
+**Impact if left unfixed:**
+- Fluorescence values in heavily-overlapped voxels are artificially elevated
+- Spatial crosstalk in downstream Phase 2 PSF convolution is exaggerated —
+  demixing / source-separation benchmarks run on calcia data will look
+  easier than on real two-photon recordings
+- Quantitative comparisons of "what fraction of a pixel is contributed by
+  which cell" will be skewed
+
+---
+
 ## Phase 1 — General
 
 ### Issue G1: Full pipeline runtime is very slow (~2.7 hours)
@@ -140,6 +234,8 @@ re-run `run_phase1_for_comparison.m` in MATLAB to regenerate it.
 |----|------|-------------|----------|--------|
 | V1 | Vasculature | Per-connection radius in rendering | Medium | ~2 days |
 | V2 | Vasculature | Interior surface node sampling | Low | ~0.5 days |
+| M1 | Model | No blood flow / hemodynamics simulation | Low (use-case dependent) | ~2 weeks |
+| M2 | Model | Neural volume component overlap (needs verification) | Medium | ~1 week |
 | G1 | Performance | Full pipeline ~2.7 hrs | Medium | ~3 days |
 | P2-1 | Phase 2 | TPM scanning not implemented | **High** | ~2 weeks |
 | C1 | Tooling | Regenerate MATLAB stats .mat | Low | ~2 hrs (MATLAB run) |
