@@ -474,6 +474,11 @@ class SpikeParams:
         spikeflag: If True, store raw spike counts in TimeTracesResult.
         dendflag: If True, simulate dendrite fluorescence traces.
         axonflag: If True, simulate axon/background fluorescence traces.
+        bg_scale: Multiplicative brightness scale applied to the background /
+            neuropil traces (soma and dendrite traces are unaffected). 1.0
+            reproduces the default NAOMi amplitude; lower values dim the
+            diffuse neuropil (e.g. 0.2 -> 20%) to reduce whole-FOV wash-out
+            without removing the background entirely.
         ensure_activity: If True, inject spikes into silent soma neurons
             when the spike generation step produces very little activity.
             This can happen when ``rate`` is low relative to the simulation
@@ -504,6 +509,7 @@ class SpikeParams:
     spikeflag: bool = True
     dendflag: bool = True
     axonflag: bool = True
+    bg_scale: float = 1.0
     ensure_activity: bool = False
     n_soma: Optional[int] = None
     verbose: int = 1

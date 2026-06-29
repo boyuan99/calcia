@@ -45,6 +45,10 @@ def parse_args():
         "--nt", type=int, default=None,
         help="Number of time frames (overrides preset)")
     parser.add_argument(
+        "--bg-scale", type=float, default=1.0,
+        help="Neuropil/background brightness scale (1.0=NAOMi default; "
+             "lower dims the diffuse background, e.g. 0.25)")
+    parser.add_argument(
         "--outdir", type=str, default=None,
         help="Output directory (default: examples/output)")
     parser.add_argument(
@@ -288,6 +292,7 @@ def main():
         axonflag=has_axons,
         rate=0.25,
         prot="GCaMP6f",
+        bg_scale=args.bg_scale,
     )
     cal_params = CalciumParams(prot_type="gcamp6f")
 

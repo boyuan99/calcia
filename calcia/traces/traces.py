@@ -551,6 +551,11 @@ def generate_time_traces(
         # MATLAB fallback: if bg is empty and axonflag, bg = dend
         S_bg = S_dend
 
+    # User-facing neuropil brightness knob (1.0 = default NAOMi amplitude).
+    # Applied to the final background traces only; soma/dend are unaffected.
+    if S_bg is not None and spike_params.bg_scale != 1.0:
+        S_bg = S_bg * np.float32(spike_params.bg_scale)
+
     if v >= 1:
         print("\nTime trace generation complete.")
 
