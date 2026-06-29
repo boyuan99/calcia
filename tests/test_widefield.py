@@ -664,3 +664,69 @@ class TestScanWidefield:
         # Dispatcher stores widefield params, not tpm_params
         assert "wf_params" in result.params
         assert "tpm_params" not in result.params
+
+    # --- In-focus / out-of-focus separation ---------------------------
+
+    _sp = dict(scan_buff=4, motion=False, sfrac=2, verbose=0)
+
+    def test_separate_focus_default_none(self, synthetic_inputs):
+        from calcia.scanning import scan_widefield
+        vol_out, opt_out, time_out, spike_params = synthetic_inputs
+        r = scan_widefield(vol_out, opt_out, time_out,
+                           scan_params=ScanParams(**self._sp),
+                           spike_params=spike_params, seed=7)
+        assert r.mov_infocus is None and r.mov_oof is None
+
+    def test_separate_focus_invariant(self, synthetic_inputs):
+        """Partial slab: mov_raw == infocus + oof, both non-trivial."""
+        from calcia.scanning import scan_widefield
+        vol_out, opt_out, time_out, spike_params = synthetic_inputs
+        r = scan_widefield(vol_out, opt_out, time_out,
+                           scan_params=ScanParams(**self._sp),
+                           spike_params=spike_params, seed=7,
+                           separate_focus=True, focus_slab_um=2.0)
+        assert r.mov_infocus is not None and r.mov_oof is not None
+        assert r.mov_infocus.shape == r.mov_raw.shape
+        assert r.mov_oof.dtype == np.float32
+        np.testing.assert_allclose(r.mov_raw, r.mov_infocus + r.mov_oof,
+                                   rtol=1e-4, atol=1e-4)
+        # A thin slab (z=6+/-1 of 12 planes) leaves real energy in both halves.
+        assert np.any(r.mov_infocus != 0)
+        assert np.any(r.mov_oof != 0)
+
+    def test_separate_focus_full_slab_oof_zero(self, synthetic_inputs):
+        """A slab covering the whole stack puts all light in focus."""
+        from calcia.scanning import scan_widefield
+        vol_out, opt_out, time_out, spike_params = synthetic_inputs
+        r = scan_widefield(vol_out, opt_out, time_out,
+                           scan_params=ScanParams(**self._sp),
+                           spike_params=spike_params, seed=7,
+                           separate_focus=True, focus_slab_um=1e6)
+        np.testing.assert_array_equal(r.mov_oof, np.zeros_like(r.mov_oof))
+        np.testing.assert_allclose(r.mov_infocus, r.mov_raw, rtol=1e-5,
+                                   atol=1e-5)
+
+    def test_separate_focus_default_path_identical(self, synthetic_inputs):
+        """separate_focus must not perturb mov / mov_raw (same RNG draws)."""
+        from calcia.scanning import scan_widefield
+        vol_out, opt_out, time_out, spike_params = synthetic_inputs
+        r_off = scan_widefield(vol_out, opt_out, time_out,
+                               scan_params=ScanParams(**self._sp),
+                               spike_params=spike_params, seed=7)
+        r_on = scan_widefield(vol_out, opt_out, time_out,
+                              scan_params=ScanParams(**self._sp),
+                              spike_params=spike_params, seed=7,
+                              separate_focus=True, focus_slab_um=2.0)
+        np.testing.assert_array_equal(r_off.mov, r_on.mov)
+        np.testing.assert_array_equal(r_off.mov_raw, r_on.mov_raw)
+
+    def test_separate_focus_deterministic(self, synthetic_inputs):
+        from calcia.scanning import scan_widefield
+        vol_out, opt_out, time_out, spike_params = synthetic_inputs
+        kw = dict(scan_params=ScanParams(**self._sp),
+                  spike_params=spike_params, seed=7,
+                  separate_focus=True, focus_slab_um=2.0)
+        r1 = scan_widefield(vol_out, opt_out, time_out, **kw)
+        r2 = scan_widefield(vol_out, opt_out, time_out, **kw)
+        np.testing.assert_array_equal(r1.mov_infocus, r2.mov_infocus)
+        np.testing.assert_array_equal(r1.mov_oof, r2.mov_oof)

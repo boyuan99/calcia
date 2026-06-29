@@ -443,3 +443,140 @@ class TestScanVolumeIntegration:
         # mot_hist should not be all identical across frames
         # (with motion=True some variation is expected)
         assert result.mot_hist.shape == (3, 5)
+
+
+# ======================================================================
+# In-focus / out-of-focus separation (separate_focus=True)
+# ======================================================================
+
+def _build_focus_inputs(with_tails: bool):
+    """Minimal Phase 1/2/3 inputs, optionally with non-zero PSF tails."""
+    from calcia.optics.psf import PsfTail
+    from calcia.optics.propagation import OpticalPropagationResult
+    from calcia.pipeline import NeuralVolumeOutput
+    from calcia.traces.traces import TimeTracesResult
+    from calcia.volume.fluorescence import CellFluorescenceData
+
+    rng = np.random.default_rng(7)
+    N1, N2, N3 = 30, 30, 10
+    K = 3
+    Nt = 5
+
+    neur_vol = rng.random((N1, N2, N3)).astype(np.float32) * 0.01
+    gp_vals = []
+    for _ in range(K):
+        n_vox = 20
+        indices = rng.integers(0, N1 * N2 * N3, size=n_vox).astype(np.int32)
+        fluor = rng.random(n_vox).astype(np.float32)
+        soma_mask = np.zeros(n_vox, dtype=bool)
+        soma_mask[:10] = True
+        gp_vals.append(CellFluorescenceData(
+            indices=indices, fluorescence=fluor, soma_mask=soma_mask))
+
+    gp_nuc = [(np.array([], dtype=np.int32), 0.0)] * K
+    vol_out = NeuralVolumeOutput(
+        neur_vol=neur_vol, gp_nuc=gp_nuc,
+        gp_soma=[np.array([], dtype=np.int32)] * K, gp_vals=gp_vals,
+        neur_ves=None, bg_proc=[], locs=rng.random((K, 3)).astype(np.float32) * 30,
+        neur_num=np.zeros((N1, N2, N3), dtype=np.uint16),
+        neur_num_ad=np.zeros((N1, N2, N3), dtype=np.uint16),
+        gp_bgvals=[], params={})
+
+    psf = np.zeros((5, 5, 6), dtype=np.float32)
+    psf[2, 2, 3] = 1.0
+
+    if with_tails:
+        tail_kernel = np.zeros((5, 5), dtype=np.float32)
+        tail_kernel[2, 2] = 1.0  # delta lateral kernel
+        psf_top = PsfTail(weights=tail_kernel.copy(),
+                          mask=np.ones((N1, N2), dtype=np.float32), weight=0.3)
+        psf_bot = PsfTail(weights=tail_kernel.copy(),
+                          mask=np.ones((N1, N2), dtype=np.float32), weight=0.3)
+    else:
+        psf_top = PsfTail(weights=np.zeros((N1, N2), dtype=np.float32),
+                          mask=np.ones((N1, N2), dtype=np.float32))
+        psf_bot = PsfTail(weights=np.zeros((N1, N2), dtype=np.float32),
+                          mask=np.ones((N1, N2), dtype=np.float32))
+
+    opt_out = OpticalPropagationResult(
+        psf=psf, mask=np.ones((N1, N2), dtype=np.float32),
+        psf_top=psf_top, psf_bot=psf_bot,
+        col_mask=np.ones((N1, N2), dtype=np.float32), params={})
+
+    soma = rng.random((K, Nt)).astype(np.float32) + 1.0
+    dend = rng.random((K, Nt)).astype(np.float32) + 1.0
+    spike_params = SpikeParams(K=K, nt=Nt, dt=1.0 / 30, verbose=0)
+    time_out = TimeTracesResult(
+        soma=soma, dend=dend, bg=None, spikes=None,
+        mod_vals=np.ones(K, dtype=np.float32),
+        params={"spike_params": spike_params, "cal_params": None})
+
+    return vol_out, opt_out, time_out, spike_params
+
+
+class TestScanVolumeFocusSeparation:
+    """Tests for the opt-in in-focus / out-of-focus split."""
+
+    _scan_params = dict(scan_buff=3, motion=False, sfrac=2, verbose=0)
+
+    def test_default_fields_none(self):
+        from calcia.scanning import scan_volume
+        vol_out, opt_out, time_out, spike_params = _build_focus_inputs(True)
+        r = scan_volume(vol_out, opt_out, time_out,
+                        scan_params=ScanParams(**self._scan_params),
+                        spike_params=spike_params, seed=42)
+        assert r.mov_infocus is None
+        assert r.mov_oof is None
+
+    def test_invariant_with_tails(self):
+        """mov_raw == mov_infocus + mov_oof, and oof is non-trivial."""
+        from calcia.scanning import scan_volume
+        vol_out, opt_out, time_out, spike_params = _build_focus_inputs(True)
+        r = scan_volume(vol_out, opt_out, time_out,
+                        scan_params=ScanParams(**self._scan_params),
+                        spike_params=spike_params, seed=42,
+                        separate_focus=True)
+        assert r.mov_infocus is not None and r.mov_oof is not None
+        assert r.mov_infocus.shape == r.mov_raw.shape
+        assert r.mov_oof.shape == r.mov_raw.shape
+        assert r.mov_infocus.dtype == np.float32
+        assert r.mov_oof.dtype == np.float32
+        np.testing.assert_allclose(r.mov_raw, r.mov_infocus + r.mov_oof,
+                                   rtol=1e-4, atol=1e-4)
+        # With tails enabled the defocus background must carry real energy.
+        assert np.any(r.mov_oof != 0)
+
+    def test_no_tails_oof_zero(self):
+        """Without tails, all light is in-focus: oof==0, infocus==mov_raw."""
+        from calcia.scanning import scan_volume
+        vol_out, opt_out, time_out, spike_params = _build_focus_inputs(False)
+        r = scan_volume(vol_out, opt_out, time_out,
+                        scan_params=ScanParams(**self._scan_params),
+                        spike_params=spike_params, seed=42,
+                        separate_focus=True)
+        np.testing.assert_array_equal(r.mov_oof, np.zeros_like(r.mov_oof))
+        np.testing.assert_array_equal(r.mov_infocus, r.mov_raw)
+
+    def test_default_path_bit_identical(self):
+        """separate_focus must not perturb mov / mov_raw (same RNG draws)."""
+        from calcia.scanning import scan_volume
+        vol_out, opt_out, time_out, spike_params = _build_focus_inputs(True)
+        r_off = scan_volume(vol_out, opt_out, time_out,
+                            scan_params=ScanParams(**self._scan_params),
+                            spike_params=spike_params, seed=42)
+        r_on = scan_volume(vol_out, opt_out, time_out,
+                           scan_params=ScanParams(**self._scan_params),
+                           spike_params=spike_params, seed=42,
+                           separate_focus=True)
+        np.testing.assert_array_equal(r_off.mov, r_on.mov)
+        np.testing.assert_array_equal(r_off.mov_raw, r_on.mov_raw)
+
+    def test_deterministic(self):
+        from calcia.scanning import scan_volume
+        vol_out, opt_out, time_out, spike_params = _build_focus_inputs(True)
+        kw = dict(scan_params=ScanParams(**self._scan_params),
+                  spike_params=spike_params, seed=42, separate_focus=True)
+        r1 = scan_volume(vol_out, opt_out, time_out, **kw)
+        r2 = scan_volume(vol_out, opt_out, time_out, **kw)
+        np.testing.assert_array_equal(r1.mov_infocus, r2.mov_infocus)
+        np.testing.assert_array_equal(r1.mov_oof, r2.mov_oof)

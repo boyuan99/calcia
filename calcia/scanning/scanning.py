@@ -39,11 +39,22 @@ class ScanResult:
         ``(3, Nt)`` float32 motion history ``[x, y, z]``.
     params : dict
         Parameter objects used for the scan.
+    mov_infocus : np.ndarray, optional
+        ``(H, W, Nt)`` float32 clean in-focus image (before noise), produced
+        only when ``scan_volume(..., separate_focus=True)``. Contains the
+        in-focus contribution of all components (soma + dendrites + nucleus +
+        axons), i.e. ``mov_raw`` minus the out-of-focus blur. ``None`` otherwise.
+    mov_oof : np.ndarray, optional
+        ``(H, W, Nt)`` float32 clean out-of-focus (defocus) background image
+        (before noise), produced only when ``separate_focus=True``. By linearity
+        ``mov_raw == mov_infocus + mov_oof`` (up to float). ``None`` otherwise.
     """
     mov: np.ndarray
     mov_raw: np.ndarray
     mot_hist: np.ndarray
     params: Dict
+    mov_infocus: Optional[np.ndarray] = None
+    mov_oof: Optional[np.ndarray] = None
 
 
 def scan_volume(
@@ -56,6 +67,8 @@ def scan_volume(
     spike_params: Optional["SpikeParams"] = None,
     *,
     seed: Optional[int] = None,
+    separate_focus: bool = False,
+    focus_slab_um: Optional[float] = None,
 ) -> ScanResult:
     """Scan a 3-D neural volume and create a simulated two-photon movie.
 
@@ -80,6 +93,20 @@ def scan_volume(
         ``SpikeParams`` stored in ``time_out.params``.
     seed : int, optional
         Random seed for reproducibility.
+    separate_focus : bool, default False
+        If ``True``, additionally return noiseless ``mov_infocus`` and
+        ``mov_oof`` (in-focus / out-of-focus decomposition) on the
+        :class:`ScanResult`. The decomposition is exact by linearity of the
+        convolution (``mov_raw == mov_infocus + mov_oof``) and adds no extra
+        convolution — both images already exist as intermediates. When ``False``
+        the code path is bit-identical to before and both fields are ``None``.
+        On the widefield path the split is also supported but is NOT free:
+        it costs one extra convolution per frame (see ``focus_slab_um``).
+    focus_slab_um : float, optional
+        Widefield only. Full thickness (in microns) of the in-focus slab,
+        centered on the focal plane (volume z-midpoint). When ``None``, defaults
+        to the widefield axial depth-of-field ``2*n*lambda_em/NA**2``. Ignored
+        on the two-photon path (whose in-focus slab is fixed by the PSF z-extent).
 
     Returns
     -------
@@ -99,6 +126,8 @@ def scan_volume(
             scan_params=scan_params,
             spike_params=spike_params,
             seed=seed,
+            separate_focus=separate_focus,
+            focus_slab_um=focus_slab_um,
         )
 
     # ------------------------------------------------------------------
@@ -368,6 +397,10 @@ def scan_volume(
     mov = np.zeros((out_h, out_w, Nt), dtype=np.float32)
     mov_raw = np.zeros((out_h, out_w, Nt), dtype=np.float32)
     mot_hist = np.zeros((3, Nt), dtype=np.float32)
+    mov_infocus = (np.zeros((out_h, out_w, Nt), dtype=np.float32)
+                   if separate_focus else None)
+    mov_oof = (np.zeros((out_h, out_w, Nt), dtype=np.float32)
+               if separate_focus else None)
 
     # ------------------------------------------------------------------
     # Per-frame scanning loop
@@ -381,6 +414,24 @@ def scan_volume(
     n_nuc = len(nuc_idx_list) if nuc_label else 0
 
     sfrac_int = int(sfrac) == sfrac
+
+    def _post(img, x_pos, y_off):
+        """Apply per-frame row shifts + downsampling (no RNG side effects).
+
+        Identical operations to the inline ``clean_img`` post-processing, so
+        reusing it on the in-focus / out-of-focus components keeps them aligned
+        with ``mov_raw`` and leaves the default path numerically unchanged.
+        """
+        img = apply_row_shifts(img, scan_buff, x_pos, y_off)
+        if sfrac_int:
+            s = int(sfrac)
+            img = convolve2d(img, np.ones((s, s), dtype=np.float32),
+                             mode='same')
+            img = img[::s, ::s]
+        else:
+            from scipy.ndimage import zoom
+            img = sfrac ** 2 * zoom(img, 1.0 / sfrac, order=1)
+        return img
 
     for kk in range(Nt):
         # --- Motion update ---
@@ -454,6 +505,11 @@ def scan_volume(
         clean_img = (sigscale / (2 * sfrac ** 2)) * single_scan(
             scan_vol, PSF.shape, freq_psf, scan_avg)
 
+        # In-focus / out-of-focus split (opt-in, exact by linearity).
+        if separate_focus:
+            infocus_img = clean_img.copy()
+            oof_img = np.zeros_like(clean_img)
+
         # --- Out-of-focus blur ---
         if has_tails:
             inv_mask = 1.0 / t_mask if t_mask is not None else None
@@ -481,20 +537,16 @@ def scan_volume(
                 extra_vols=[f0vol],
             )
 
-            clean_img += (top_img + bot_img) * (sigscale / sfrac ** 2)
+            oof_contrib = (top_img + bot_img) * (sigscale / sfrac ** 2)
+            clean_img += oof_contrib
+            if separate_focus:
+                oof_img = oof_contrib
 
-        # --- Row shifts ---
-        clean_img = apply_row_shifts(clean_img, scan_buff, x_pos, y_off)
-
-        # --- Downsample ---
-        if sfrac_int:
-            s = int(sfrac)
-            clean_img = convolve2d(clean_img, np.ones((s, s), dtype=np.float32),
-                                   mode='same')
-            clean_img = clean_img[::s, ::s]
-        else:
-            from scipy.ndimage import zoom
-            clean_img = sfrac ** 2 * zoom(clean_img, 1.0 / sfrac, order=1)
+        # --- Row shifts + downsample ---
+        clean_img = _post(clean_img, x_pos, y_off)
+        if separate_focus:
+            infocus_img = _post(infocus_img, x_pos, y_off)
+            oof_img = _post(oof_img, x_pos, y_off)
 
         # --- Noise model ---
         samp_img = poisson_gauss_noise(clean_img, noise_params, rng)
@@ -505,6 +557,9 @@ def scan_volume(
         h, w = samp_img.shape
         mov[:h, :w, kk] = samp_img
         mov_raw[:h, :w, kk] = clean_img
+        if separate_focus:
+            mov_infocus[:h, :w, kk] = infocus_img
+            mov_oof[:h, :w, kk] = oof_img
 
         if verbose >= 2 and (kk + 1) % max(1, Nt // 10) == 0:
             print(f"    Frame {kk + 1}/{Nt}")
@@ -522,6 +577,8 @@ def scan_volume(
             "noise_params": noise_params,
             "tpm_params": tpm_params,
         },
+        mov_infocus=mov_infocus,
+        mov_oof=mov_oof,
     )
 
 
