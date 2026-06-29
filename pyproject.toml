@@ -29,6 +29,11 @@ dependencies = [
     "scipy>=1.7.0",
     "trimesh>=3.9.0",
     "scikit-image>=0.19.0",
+    # Accelerated ray backend for trimesh point-in-mesh tests (Phase 1, ~52%
+    # of runtime). trimesh auto-uses it; without it, the slower pure-Python
+    # ray_triangle backend runs instead and yields a slightly different volume
+    # realization, so we pin it for consistent + fast results across machines.
+    "embreex>=4.0.0",
 ]
 
 [project.optional-dependencies]
