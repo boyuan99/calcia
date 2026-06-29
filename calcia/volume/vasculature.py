@@ -487,6 +487,50 @@ def generate_source_nodes(
     return nodes
 
 
+def generate_penetrator_sources(
+    vol_params: VolumeParams,
+    vasc_params: VascParams,
+) -> List[VesselNode]:
+    """
+    Generate source nodes for the deep-perforator (striatum) vasculature.
+
+    Unlike cortical surface sources (placed on the top z-plane), these are
+    distributed throughout the 3D volume with isotropic entry directions,
+    representing lenticulostriate perforators that course through the tissue
+    rather than diving from a pial surface. Used when ``depth_surf <= 0``.
+
+    Args:
+        vol_params: Volume parameters.
+        vasc_params: Vasculature parameters.
+
+    Returns:
+        List of type-1 source VesselNode objects with isotropic directions.
+    """
+    vdom = _vessel_domain(vol_params)
+
+    n_src = max(1, int(np.ceil(vdom[0] * vdom[1] / (vasc_params.vesFreq[1] ** 2))))
+    n_src = max(1, int(n_src * (1 + vasc_params.vesNumScale * np.random.randn())))
+
+    nodes = []
+    for i in range(n_src):
+        pos = np.array([
+            np.random.rand() * vdom[0],
+            np.random.rand() * vdom[1],
+            np.random.rand() * vdom[2],
+        ])
+        direction = np.random.randn(3)
+        direction = direction / (np.linalg.norm(direction) + 1e-9)
+        nodes.append(VesselNode(
+            num=i,
+            root=-1,
+            pos=pos,
+            type=1,
+            misc={'direction': direction},
+        ))
+
+    return nodes
+
+
 # =============================================================================
 # Major Vessel Growth
 # =============================================================================
@@ -668,6 +712,72 @@ def connect_vessel_nodes(
 # Diving Vessels
 # =============================================================================
 
+def _grow_diving_vessels_isotropic(
+    network: VesselNetwork,
+    vol_params: VolumeParams,
+    vasc_params: VascParams,
+    vdom: np.ndarray,
+    verbose: int = 1,
+) -> VesselNetwork:
+    """
+    Grow isotropic penetrating vessels (striatum / deep-perforator variant).
+
+    Each type-1 source node (distributed through the 3D volume) becomes the
+    root of a persistent random walk in an arbitrary direction, rather than a
+    strictly-downward dive from a pial surface. Vessels stop when they leave
+    the volume domain.
+    """
+    nodes = list(network.nodes)
+    source_indices = [i for i, n in enumerate(nodes) if n.type == 1]
+
+    lensc = vasc_params.node_params.lensc
+    dirvar = vasc_params.node_params.dirvar
+    n_steps = max(5, int(np.ceil(vdom[2] / lensc)))
+
+    for src_idx in source_indices:
+        current_pos = nodes[src_idx].pos.copy()
+        direction = np.asarray(
+            nodes[src_idx].misc.get('direction', np.random.randn(3)),
+            dtype=float,
+        )
+        direction = direction / (np.linalg.norm(direction) + 1e-9)
+        parent_idx = src_idx
+
+        for _ in range(n_steps):
+            # Persistent random walk: nudge the direction a little each step.
+            direction = direction + dirvar * (np.random.rand(3) - 0.5)
+            direction = direction / (np.linalg.norm(direction) + 1e-9)
+
+            jitter = np.asarray(vasc_params.ves_shift) * (np.random.rand(3) - 0.5)
+            new_pos = current_pos + direction * lensc + jitter
+
+            # Stop the vessel when it exits the volume domain.
+            if not (0 <= new_pos[0] <= vdom[0]
+                    and 0 <= new_pos[1] <= vdom[1]
+                    and 0 <= new_pos[2] <= vdom[2]):
+                break
+
+            node = VesselNode(
+                num=len(nodes),
+                root=parent_idx,
+                conn=[parent_idx],
+                pos=new_pos,
+                type=3,  # Diving/penetrating vessel node
+            )
+            nodes[parent_idx].conn.append(node.num)
+            nodes.append(node)
+
+            parent_idx = node.num
+            current_pos = new_pos
+
+    network.nodes = nodes
+
+    if verbose >= 1:
+        print(f"  Isotropic penetrating vessels complete: {len(nodes)} total nodes")
+
+    return network
+
+
 def grow_diving_vessels(
     network: VesselNetwork,
     vol_params: VolumeParams,
@@ -693,6 +803,13 @@ def grow_diving_vessels(
     """
     vdom = _vessel_domain(vol_params)
     full_depth = vdom[2]
+
+    # Striatum (deep-perforator) variant: no pial surface, so vessels course
+    # through the tissue in arbitrary directions from 3D-distributed sources.
+    if vasc_params.depth_surf <= 0:
+        return _grow_diving_vessels_isotropic(
+            network, vol_params, vasc_params, vdom, verbose
+        )
 
     # Calculate number of diving vessels (using vessel domain XY)
     n_diving = max(1, int(np.ceil(
@@ -1325,10 +1442,19 @@ def simulate_blood_vessels(
         print("Simulating blood vessel network...")
         print("=" * 50)
 
-    # Step 1: Grow major (surface) vessels
-    network = grow_major_vessels(vol_params, vasc_params, verbose)
+    # Step 1: Seed the network. Cortex grows a pial surface vessel net;
+    # striatum (depth_surf<=0) instead scatters deep-perforator source nodes
+    # through the 3D volume (no surface layer).
+    if vasc_params.depth_surf <= 0:
+        if verbose >= 1:
+            print("  Deep-perforator mode: skipping surface vessels")
+        network = VesselNetwork(
+            nodes=generate_penetrator_sources(vol_params, vasc_params)
+        )
+    else:
+        network = grow_major_vessels(vol_params, vasc_params, verbose)
 
-    # Step 2: Grow diving vessels
+    # Step 2: Grow diving/penetrating vessels (isotropic when depth_surf<=0)
     network = grow_diving_vessels(network, vol_params, vasc_params, verbose)
 
     # Step 3: Grow capillary network

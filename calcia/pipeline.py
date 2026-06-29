@@ -19,6 +19,7 @@ from .config.params import (
     PsfParams,
     VascParams,
     VolumeParams,
+    apply_region_defaults,
 )
 from .optics.psf import gaussian_beam_size
 from .volume.background import (
@@ -138,6 +139,11 @@ def simulate_neural_volume(
         axon_params = AxonParams()
     if psf_params is None:
         psf_params = PsfParams()
+
+    # Apply region-specific presets (no-op for 'cortex'). Mutates neur/vasc/
+    # dend params in place so this works whether the caller passed custom
+    # objects or relied on the defaults constructed just above.
+    apply_region_defaults(vol_params, neur_params, vasc_params, dend_params)
 
     if verbose is not None:
         vol_params.verbose = verbose

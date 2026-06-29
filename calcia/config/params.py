@@ -30,6 +30,9 @@ class VolumeParams:
         neur_density: Neuron density in neurons/mm^3.
         N_den: Number of apical dendrites (computed from density if not set).
         AD_density: Apical dendrite density.
+        region: Tissue region preset. 'cortex' (default) keeps the original
+            pyramidal/pial-surface model. 'striatum' applies MSN + deep-
+            perforator-vasculature defaults via apply_region_defaults().
     """
     vol_sz: Tuple[int, int, int] = (100, 100, 50)
     min_dist: float = 16.0
@@ -43,6 +46,7 @@ class VolumeParams:
     N_den: Optional[int] = None
     AD_density: float = 2e3
     vasc_sz: Optional[Tuple[int, int, int]] = None
+    region: str = "cortex"
 
     def __post_init__(self):
         """Initialize computed parameters after dataclass initialization."""
@@ -57,10 +61,16 @@ class VolumeParams:
         if self.N_neur is None:
             self.N_neur = int(math.ceil(self.neur_density * vol_um3 / 1e9))
 
-        # Calculate number of apical dendrites from density if not specified
+        # Calculate number of apical dendrites from density if not specified.
+        # Striatal MSNs have no apical dendrites, so the striatum preset
+        # forces N_den=0 here (the None sentinel is gone by the time the
+        # pipeline runs, so this branch must live in __post_init__).
         if self.N_den is None:
-            area_um2 = self.vol_sz[0] * self.vol_sz[1]
-            self.N_den = int(self.AD_density * area_um2 / 1e6)
+            if self.region == "striatum":
+                self.N_den = 0
+            else:
+                area_um2 = self.vol_sz[0] * self.vol_sz[1]
+                self.N_den = int(self.AD_density * area_um2 / 1e6)
 
 
 @dataclass
@@ -650,3 +660,53 @@ class CameraNoiseParams:
     gain_e_per_adu: float = 1.0
     bit_depth: int = 16
     pixel_gain_sigma: float = 0.01
+
+
+# ---------------------------------------------------------------------------
+# Region presets
+# ---------------------------------------------------------------------------
+# Striatum (medium spiny neuron tissue) preset. Literature-backed:
+#   - MSN soma 15-18 um diameter -> avg_rad ~8; ovoid/spherical shape.
+#   - No apical dendrites; 5-6 primary dendrites in a ~250 um spherical field.
+#   - Microvascular density comparable to cortex (so capillary spacing kept);
+#     differences are topology: no pial surface layer (depth_surf=0), isotropic
+#     penetrators (handled in vasculature.py via the depth_surf<=0 sentinel),
+#     and fewer anastomoses (higher distsc -> more terminal vessels).
+_STRIATUM_NEURON = {
+    "neur_type": "spherical",
+    "avg_rad": 8.0,
+    "eccen": (0.15, 0.15, 0.15),
+}
+_STRIATUM_VASC = {
+    "depth_surf": 0.0,
+    "vesSize": (9.0, 9.0, 2.0),
+    "vesFreq": (200.0, 200.0, 50.0),
+    "distsc": 6.0,
+}
+_STRIATUM_DEND = {
+    "dtParams": (5.0, 125.0, 125.0, 1.0, 1.0),
+    "atParams": (0.0, 5.0, 5.0, 5.0, 1.0),
+}
+
+
+def apply_region_defaults(vol_params, neur_params, vasc_params, dend_params):
+    """Apply region-specific parameter presets in place.
+
+    No-op for the default 'cortex' region, so existing behavior is unchanged.
+    For 'striatum', overwrites the MSN/vasculature/dendrite fields listed in
+    the ``_STRIATUM_*`` dicts above. ``getattr`` is used so volume params from
+    older pickles (without a ``region`` field) are treated as cortex.
+    """
+    region = getattr(vol_params, "region", "cortex")
+    if region == "cortex":
+        return
+    if region != "striatum":
+        raise ValueError(
+            f"Unknown region {region!r}. Supported: 'cortex', 'striatum'."
+        )
+    for k, v in _STRIATUM_NEURON.items():
+        setattr(neur_params, k, v)
+    for k, v in _STRIATUM_VASC.items():
+        setattr(vasc_params, k, v)
+    for k, v in _STRIATUM_DEND.items():
+        setattr(dend_params, k, v)
