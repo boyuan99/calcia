@@ -165,7 +165,7 @@ cells physically occupy disjoint volumes.
 **Priority:** Medium — needed for iteration speed
 
 **Symptom:**
-`demo_phase1.py` (vol_sz=250×250×100, vres=2) takes ~9600 seconds.
+Phase 1 (`simulate_neural_volume`, vol_sz=250×250×100, vres=2) takes ~9600 seconds.
 
 **Likely bottlenecks (from pyinstrument profile):**
 - `connections_to_volume()`: sphere-drawing loop in pure Python
