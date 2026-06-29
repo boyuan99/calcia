@@ -51,6 +51,8 @@ import time
 import numpy as np
 from pyinstrument import Profiler
 
+import _striatum_common as C
+
 
 OUTPUT_ROOT = os.path.join(os.path.dirname(__file__), "output")
 SHARED_DIR = os.path.join(OUTPUT_ROOT, "_shared")
@@ -61,6 +63,9 @@ def parse_args():
     p.add_argument("--smoke", action="store_true",
                    help="Tiny fast run (80x80x50, 30 frames) to verify the "
                         "pipeline + save logic before the long run")
+    p.add_argument("--medium", action="store_true",
+                   help="Medium volume (250x250x100, 300 frames) — large "
+                        "enough to assess background wash-out")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--nt", type=int, default=None,
                    help="Number of frames (overrides preset)")
@@ -76,15 +81,21 @@ def parse_args():
     p.add_argument("--burst-mean", type=int, default=0, dest="burst_mean",
                    help="Mean intra-burst spike count (burst mode). 0 = single "
                         "spikes / pure Poisson. Default 0")
+    p.add_argument("--bg-scale", type=float, default=0.1, dest="bg_scale",
+                   help="Neuropil/axon trace amplitude scale. The dense axon "
+                        "background is the dominant 1P widefield wash-out source; "
+                        "0.1 takes brightest-frame spatial CV from ~0.65 to ~0.95 "
+                        "(cells become visible). 1.0 = raw NAOMi amplitude "
+                        "(washed). Default 0.1")
     p.add_argument("--vres", type=int, default=2,
                    help="Voxels per um (default 2; use 1 to cut memory ~8x)")
     p.add_argument("--prot", type=str, default="GCaMP6f")
     return p.parse_args()
 
 
-def phase1_signature(vol_sz, vol_depth, vres, seed):
+def phase1_signature(vol_sz, vol_depth, vres, seed, region):
     h = hashlib.sha1()
-    h.update(repr((tuple(vol_sz), vol_depth, vres, seed)).encode())
+    h.update(repr((tuple(vol_sz), vol_depth, vres, seed, region)).encode())
     return h.hexdigest()[:10]
 
 
@@ -96,50 +107,8 @@ def save_profile(profiler, run_dir, name):
     print(f"  Profile saved: {html_path}")
 
 
-def save_tiff_normalized(mov, path):
-    import tifffile
-    arr = mov.astype(np.float64)
-    lo, hi = np.percentile(arr, [0.5, 99.5])
-    if hi > lo:
-        arr = (arr - lo) / (hi - lo)
-    arr = np.clip(arr * 65535, 0, 65535).astype(np.uint16)
-    arr = np.transpose(arr, (2, 0, 1))
-    tifffile.imwrite(path, arr, imagej=True)
-
-
-def make_video(mov_noisy, mov_clean, path, dt, contrast=0.995, fps=30):
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-    from matplotlib.animation import FuncAnimation
-
-    nt = mov_noisy.shape[2]
-    vmin_n = np.percentile(mov_noisy, (1 - contrast) * 100)
-    vmax_n = np.percentile(mov_noisy, contrast * 100)
-    vmin_c = np.percentile(mov_clean, (1 - contrast) * 100)
-    vmax_c = np.percentile(mov_clean, contrast * 100)
-
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 5), dpi=100)
-    fig.subplots_adjust(wspace=0.05, left=0.02, right=0.98,
-                        top=0.90, bottom=0.02)
-    im1 = ax1.imshow(mov_noisy[:, :, 0], cmap="gray",
-                     vmin=vmin_n, vmax=vmax_n, aspect="equal")
-    im2 = ax2.imshow(mov_clean[:, :, 0], cmap="gray",
-                     vmin=vmin_c, vmax=vmax_c, aspect="equal")
-    ax1.set_title("Noisy (widefield)", fontsize=10)
-    ax2.set_title("Clean (widefield)", fontsize=10)
-    ax1.axis("off"); ax2.axis("off")
-    time_text = fig.suptitle("t = 0.000 s", fontsize=11)
-
-    def update(frame):
-        im1.set_data(mov_noisy[:, :, frame])
-        im2.set_data(mov_clean[:, :, frame])
-        time_text.set_text(f"t = {frame * dt:.3f} s")
-        return im1, im2, time_text
-
-    anim = FuncAnimation(fig, update, frames=nt, blit=True, interval=1)
-    anim.save(path, writer="pillow", fps=fps)
-    plt.close(fig)
+# Rendering helpers (save_tiff_normalized, make_video) come from
+# _striatum_common as C.*; save_profile is demo-specific (pyinstrument).
 
 
 def main():
@@ -150,6 +119,10 @@ def main():
         vol_sz = (80, 80, 50)
         nt = args.nt if args.nt is not None else 30
         tag = "striatum_smoke"
+    elif args.medium:
+        vol_sz = (250, 250, 100)
+        nt = args.nt if args.nt is not None else 300
+        tag = "striatum_medium"
     else:
         vol_sz = (500, 500, 300)
         nt = args.nt if args.nt is not None else 300
@@ -160,6 +133,7 @@ def main():
     rate = args.rate
     smod = args.smod
     burst_mean = args.burst_mean
+    bg_scale = args.bg_scale
     prot = args.prot
     dt = 1.0 / 30
 
@@ -178,6 +152,8 @@ def main():
     print(f"  Seed:      {seed}   prot={prot}")
     print(f"  Spikes:    smod={smod}  rate={rate}  burst_mean={burst_mean}"
           + (f"  (~{rate*96:.1f} Hz expected)" if smod == "burst" else ""))
+    print(f"  Neuropil:  bg_scale={bg_scale}"
+          + ("  (washed)" if bg_scale >= 1.0 else "  (de-washed)"))
     print("=" * 60)
 
     from calcia import (
@@ -185,20 +161,19 @@ def main():
         simulate_optical_propagation,
         generate_time_traces,
     )
-    from calcia.config.params import (
-        CameraNoiseParams, CalciumParams, PsfParams, ScanParams,
-        SpikeParams, VolumeParams, WidefieldParams,
-    )
+    from calcia.config.params import CalciumParams, VolumeParams
     from calcia.scanning import scan_widefield
 
     timings = {}
     profiler = Profiler()
-    vol_params = VolumeParams(vol_sz=vol_sz, vres=vres, vol_depth=vol_depth)
+    vol_params = VolumeParams(
+        vol_sz=vol_sz, vres=vres, vol_depth=vol_depth, region="striatum",
+    )
 
     # ==================================================================
     # Phase 1: Neural volume (shared cache keyed on geometry params)
     # ==================================================================
-    sig = phase1_signature(vol_sz, vol_depth, vres, seed)
+    sig = phase1_signature(vol_sz, vol_depth, vres, seed, "striatum")
     phase1_cache = os.path.join(SHARED_DIR, f"phase1_{sig}.pkl")
     print(f"\n[PHASE 1] Neural volume   (sig={sig})")
     print(f"  shared cache: {phase1_cache}")
@@ -240,14 +215,7 @@ def main():
     # ==================================================================
     print("\n[PHASE 2] Optical propagation (widefield)")
     t0 = time.time()
-    psf_params = PsfParams(
-        imaging_mode="widefield",
-        psf_type="gaussian_analytical",
-        lambda_em_um=0.52,
-        obj_na=0.8,
-        n=1.35,
-        psf_sz=(12.0, 12.0, 20.0),
-    )
+    psf_params = C.striatum_psf()
     profiler.start()
     opt_out = simulate_optical_propagation(
         vol_params=vol_params, psf_params=psf_params,
@@ -275,11 +243,9 @@ def main():
     t0 = time.time()
     K = len(vol_out.gp_vals)
     has_axons = len(vol_out.bg_proc) > 0
-    spike_params = SpikeParams(
-        K=K, nt=nt, dt=dt, N_bg=0, axonflag=has_axons,
-        rate=rate, prot=prot, smod_flag=smod, burst_mean=burst_mean,
-        verbose=1,
-    )
+    spike_params = C.striatum_spike(
+        K, nt, dt, has_axons, rate=rate, prot=prot, smod=smod,
+        burst_mean=burst_mean, bg_scale=bg_scale, verbose=1)
     cal_params = CalciumParams(prot_type=prot.lower())
     profiler.start()
     time_out = generate_time_traces(
@@ -314,11 +280,9 @@ def main():
     # ==================================================================
     print("\n[PHASE 4] Widefield camera scanning")
     t0 = time.time()
-    scan_params = ScanParams(scan_buff=10, motion=True, sfrac=2, verbose=1)
-    wf_params = WidefieldParams(pavg=2.0, lambda_ex_um=0.488, qe_det=0.8)
-    cam_params = CameraNoiseParams(
-        qe=1.0, dark_rate=0.3, t_exp=dt, read_noise=1.6, gain_e_per_adu=1.0,
-    )
+    scan_params = C.striatum_scan(verbose=1)
+    wf_params = C.striatum_wf()
+    cam_params = C.striatum_cam(dt)
     profiler.start()
     scan_out = scan_widefield(
         vol_out=vol_out, opt_out=opt_out, time_out=time_out,
@@ -363,9 +327,10 @@ def main():
     meta = dict(
         tag=tag, smoke=args.smoke,
         timestamp=_dt.datetime.now().isoformat(),
-        seed=seed, vol_sz=list(vol_sz), vol_depth=vol_depth, vres=vres,
+        seed=seed, region="striatum",
+        vol_sz=list(vol_sz), vol_depth=vol_depth, vres=vres,
         nt=nt, dt=dt, prot=prot, rate=rate,
-        smod=smod, burst_mean=burst_mean,
+        smod=smod, burst_mean=burst_mean, bg_scale=bg_scale,
         N_neur=int(vol_params.N_neur),
         N_soma_traces=int(time_out.soma.shape[0]),
         total_spikes=n_spk,
@@ -381,16 +346,16 @@ def main():
     print("  saved metadata.json")
 
     # 4. Display TIFFs (derived; can be regenerated from movies.npz)
-    save_tiff_normalized(scan_out.mov,
-                         os.path.join(run_dir, "movie_noisy.tif"))
-    save_tiff_normalized(scan_out.mov_raw,
-                         os.path.join(run_dir, "movie_clean.tif"))
+    C.save_tiff_normalized(scan_out.mov,
+                           os.path.join(run_dir, "movie_noisy.tif"))
+    C.save_tiff_normalized(scan_out.mov_raw,
+                           os.path.join(run_dir, "movie_clean.tif"))
     print("  saved display TIFFs")
 
     # 5. GIF preview LAST — non-critical, can hang/fail without data loss
     try:
-        make_video(scan_out.mov, scan_out.mov_raw,
-                   os.path.join(run_dir, "movie.gif"), dt=dt, fps=30)
+        C.make_video(scan_out.mov, scan_out.mov_raw,
+                     os.path.join(run_dir, "movie.gif"), dt=dt, fps=30)
         print("  saved movie.gif")
     except Exception as e:
         print(f"  WARNING: GIF generation failed (data already saved): {e}")
