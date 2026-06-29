@@ -233,11 +233,45 @@ def _dendrite_dijkstra_numba(
     return distance, path_from
 
 
+class DijkstraWork:
+    """Reusable scratch buffers for ``dendrite_dijkstra_6dir``.
+
+    Allocate once per (fixed) ``n_voxels`` and pass into every call so the
+    Dijkstra core reuses the same memory instead of allocating fresh arrays
+    each invocation. All buffers are reset inside the core before use, so a
+    single instance is safe to share across sequential calls of the same size.
+
+    ``touched_idx``/``touched_count`` are used only by the touched-only reset
+    path (Tier B); they are harmless for the full-reset path.
+    """
+
+    __slots__ = ("n_voxels", "distance", "path_from_flat", "visited",
+                 "heap_dist", "heap_idx", "touched_idx", "touched_count")
+
+    def __init__(self, n_voxels: int):
+        self.n_voxels = int(n_voxels)
+        # Initialized to the cleared state so the very first call (with
+        # touched_count == 0, hence no touched-only reset) starts from a valid
+        # baseline. Subsequent calls reset only the previously touched voxels.
+        self.distance = np.full(self.n_voxels, np.inf, dtype=np.float32)
+        self.path_from_flat = np.full(self.n_voxels, -1, dtype=np.int64)
+        self.visited = np.zeros(self.n_voxels, dtype=np.bool_)
+        self.heap_dist = np.empty(self.n_voxels * 2, dtype=np.float32)
+        self.heap_idx = np.empty(self.n_voxels * 2, dtype=np.int64)
+        # Touched-tracking: touched_idx[:touched_count] are the voxels written
+        # by the most recent call (the corridor), used to reset only those.
+        self.touched_idx = np.empty(self.n_voxels, dtype=np.int64)
+        self.touched_count = 0
+
+
 def dendrite_dijkstra_6dir(
     cost_6dir: np.ndarray,
     dims: Tuple[int, int, int],
     root: Tuple[int, int, int],
     use_numba: bool = True,
+    *,
+    work: Optional["DijkstraWork"] = None,
+    path_from_out: Optional[np.ndarray] = None,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Dijkstra with 6-directional costs, matching MATLAB dendrite_dijkstra2.
@@ -255,6 +289,11 @@ def dendrite_dijkstra_6dir(
         dims: (3,) volume dimensions (dx, dy, dz).
         root: (3,) 0-based root coordinates.
         use_numba: Whether to use numba acceleration.
+        work: Optional reusable scratch buffers (``DijkstraWork`` sized to
+            prod(dims)). When provided, the Dijkstra core reuses these buffers
+            instead of allocating fresh arrays each call. Results are identical.
+        path_from_out: Optional preallocated ``(*dims, 3)`` int32 array to fill
+            with parent coordinates instead of allocating a new one.
 
     Returns:
         distance: (dims) array of minimum distances from root.
@@ -288,6 +327,69 @@ def dendrite_dijkstra_6dir(
         dims[0] * dims[1], -dims[0] * dims[1],
     ], dtype=np.int64)
 
+    d0, d1, d01 = dims[0], dims[1], dims[0] * dims[1]
+
+    if work is not None:
+        if work.n_voxels != n_voxels:
+            raise ValueError(
+                f"DijkstraWork sized for {work.n_voxels} voxels, "
+                f"but dims give {n_voxels}"
+            )
+        # Reset path_from_out at the PREVIOUS call's touched cells, before the
+        # core overwrites touched_idx. (path_from_out must enter fully -1.)
+        if path_from_out is not None and work.touched_count > 0:
+            prev = work.touched_idx[:work.touched_count]
+            path_from_out[prev % d0, (prev // d0) % d1, prev // d01, :] = -1
+        if use_numba:
+            try:
+                new_count = _dijkstra_6dir_core_numba_buf(
+                    cost_6dir, pe, root_idx, dims,
+                    work.distance, work.path_from_flat, work.visited,
+                    work.heap_dist, work.heap_idx,
+                    work.touched_idx, work.touched_count,
+                )
+            except (ImportError, TypeError):
+                new_count = _dijkstra_6dir_core_python_buf(
+                    cost_6dir, pe, root_idx, n_voxels, dims,
+                    work.distance, work.path_from_flat, work.visited,
+                    work.touched_idx, work.touched_count,
+                )
+        else:
+            new_count = _dijkstra_6dir_core_python_buf(
+                cost_6dir, pe, root_idx, n_voxels, dims,
+                work.distance, work.path_from_flat, work.visited,
+                work.touched_idx, work.touched_count,
+            )
+        work.touched_count = new_count
+        dist_flat = work.distance
+        pf_flat = work.path_from_flat
+
+        distance = dist_flat.reshape(dims, order='F')
+
+        # Build path_from from only the touched (corridor) voxels — O(corridor)
+        # instead of an O(n_voxels) fill + scan. Each touched voxel is recorded
+        # exactly once, so target cells are unique and scatter order-independent.
+        if path_from_out is not None:
+            path_from = path_from_out
+        else:
+            path_from = np.full((*dims, 3), -1, dtype=np.int32)
+        ti = work.touched_idx[:new_count]
+        pf_vals = pf_flat[ti]
+        keep = pf_vals >= 0
+        valid_indices = ti[keep]
+        if valid_indices.size > 0:
+            parent_indices = pf_vals[keep]
+            px = parent_indices % d0
+            py = (parent_indices // d0) % d1
+            pz = parent_indices // d01
+            cx = valid_indices % d0
+            cy = (valid_indices // d0) % d1
+            cz = valid_indices // d01
+            path_from[cx, cy, cz, 0] = px
+            path_from[cx, cy, cz, 1] = py
+            path_from[cx, cy, cz, 2] = pz
+        return distance, path_from
+
     if use_numba:
         try:
             dist_flat, pf_flat = _dijkstra_6dir_core_numba(
@@ -305,21 +407,25 @@ def dendrite_dijkstra_6dir(
     # Reshape distance (Fortran order to match flat indexing)
     distance = dist_flat.reshape(dims, order='F')
 
-    # Convert path_from linear indices to 3D subscripts
-    path_from = np.full((*dims, 3), -1, dtype=np.int32)
+    # Convert path_from linear indices to 3D subscripts (non-buffered path)
+    if path_from_out is not None:
+        path_from = path_from_out
+        path_from.fill(-1)
+    else:
+        path_from = np.full((*dims, 3), -1, dtype=np.int32)
     valid_mask = pf_flat >= 0
     if np.any(valid_mask):
         valid_indices = np.where(valid_mask)[0]
         parent_indices = pf_flat[valid_indices]
 
         # Fortran-order linear -> subscript
-        px = parent_indices % dims[0]
-        py = (parent_indices // dims[0]) % dims[1]
-        pz = parent_indices // (dims[0] * dims[1])
+        px = parent_indices % d0
+        py = (parent_indices // d0) % d1
+        pz = parent_indices // d01
 
-        cx = valid_indices % dims[0]
-        cy = (valid_indices // dims[0]) % dims[1]
-        cz = valid_indices // (dims[0] * dims[1])
+        cx = valid_indices % d0
+        cy = (valid_indices // d0) % d1
+        cz = valid_indices // d01
 
         path_from[cx, cy, cz, 0] = px
         path_from[cx, cy, cz, 1] = py
@@ -368,6 +474,64 @@ def _dijkstra_6dir_core_python(cost_6dir, pe, root_idx, n_voxels, dims):
                 heapq.heappush(heap, (ndist, nn))
 
     return distance, path_from
+
+
+def _dijkstra_6dir_core_python_buf(cost_6dir, pe, root_idx, n_voxels, dims,
+                                   distance, path_from, visited,
+                                   touched_idx, prev_count):
+    """Buffered pure-Python core with touched-only reset.
+
+    Numerically identical to ``_dijkstra_6dir_core_python``; resets only the
+    previously touched voxels and records this call's touched voxels into
+    ``touched_idx``. Returns the new touched count.
+    """
+    inf = np.float32(np.inf)
+    for t in range(prev_count):
+        idx = touched_idx[t]
+        distance[idx] = inf
+        path_from[idx] = -1
+        visited[idx] = False
+
+    distance[root_idx] = 0.0
+    touched_idx[0] = root_idx
+    count = 1
+
+    heap = [(np.float32(0.0), int(root_idx))]
+    dims_x, dims_y = dims[0], dims[1]
+
+    while heap:
+        dist_u, u = heapq.heappop(heap)
+
+        if visited[u]:
+            continue
+        visited[u] = True
+
+        for i in range(6):
+            nn = u + int(pe[i])
+            if nn < 0 or nn >= n_voxels:
+                continue
+
+            ux = u % dims_x
+            uy = (u // dims_x) % dims_y
+            vx = nn % dims_x
+            vy = (nn // dims_x) % dims_y
+            if abs(vx - ux) > 1 or abs(vy - uy) > 1:
+                continue
+
+            if visited[nn]:
+                continue
+
+            old = distance[nn]
+            ndist = dist_u + cost_6dir[nn, i]
+            if ndist < old:
+                if old == inf:
+                    touched_idx[count] = nn
+                    count += 1
+                distance[nn] = ndist
+                path_from[nn] = u
+                heapq.heappush(heap, (ndist, nn))
+
+    return count
 
 
 # Try to compile numba function at import time
@@ -520,9 +684,90 @@ try:
 
         return distance, path_from
 
+    @njit(cache=True)
+    def _dijkstra_6dir_core_numba_buf(cost_6dir, pe, root_idx, dims,
+                                      distance, path_from, visited,
+                                      heap_dist, heap_idx,
+                                      touched_idx, prev_count):
+        """Buffered numba 6-dir Dijkstra with touched-only reset.
+
+        Numerically identical to ``_dijkstra_6dir_core_numba``. Instead of an
+        O(n_voxels) reset, only the voxels touched by the *previous* call
+        (``touched_idx[:prev_count]``) are reset to the cleared state. The
+        voxels touched by *this* call are recorded into ``touched_idx`` and the
+        new count is returned. ``distance``/``path_from``/``visited`` must be in
+        the fully-cleared state before the very first call (prev_count == 0).
+        """
+        n_voxels = cost_6dir.shape[0]
+        dims_x, dims_y = dims[0], dims[1]
+
+        # Reset only the previously touched voxels back to the cleared state.
+        for t in range(prev_count):
+            idx = touched_idx[t]
+            distance[idx] = np.float32(np.inf)
+            path_from[idx] = -1
+            visited[idx] = False
+
+        # Record root as touched (its distance/path_from are set below).
+        distance[root_idx] = np.float32(0.0)
+        touched_idx[0] = root_idx
+        count = 1
+
+        heap_size = 1
+        heap_dist[0] = np.float32(0.0)
+        heap_idx[0] = root_idx
+
+        while heap_size > 0:
+            min_i = 0
+            for i in range(1, heap_size):
+                if heap_dist[i] < heap_dist[min_i]:
+                    min_i = i
+
+            dist_u = heap_dist[min_i]
+            u = heap_idx[min_i]
+            heap_size -= 1
+            heap_dist[min_i] = heap_dist[heap_size]
+            heap_idx[min_i] = heap_idx[heap_size]
+
+            if visited[u]:
+                continue
+            visited[u] = True
+
+            ux = u % dims_x
+            uy = (u // dims_x) % dims_y
+
+            for i in range(6):
+                nn = u + pe[i]
+                if nn < 0 or nn >= n_voxels:
+                    continue
+
+                vx = nn % dims_x
+                vy = (nn // dims_x) % dims_y
+                if abs(vx - ux) > 1 or abs(vy - uy) > 1:
+                    continue
+
+                if visited[nn]:
+                    continue
+
+                old = distance[nn]
+                ndist = dist_u + cost_6dir[nn, i]
+                if ndist < old:
+                    if old == np.float32(np.inf):
+                        # First time this voxel becomes finite -> record once.
+                        touched_idx[count] = nn
+                        count += 1
+                    distance[nn] = ndist
+                    path_from[nn] = u
+                    heap_dist[heap_size] = ndist
+                    heap_idx[heap_size] = nn
+                    heap_size += 1
+
+        return count
+
 except ImportError:
     _dijkstra_core_numba = None
     _dijkstra_6dir_core_numba = None
+    _dijkstra_6dir_core_numba_buf = None
 
 
 def reconstruct_path(

@@ -15,7 +15,9 @@ from dataclasses import dataclass, field
 from typing import List, Tuple, Optional
 
 from ..config.params import VolumeParams, DendParams, NeuronParams
-from ..algorithms.dijkstra import dendrite_dijkstra_6dir, reconstruct_path
+from ..algorithms.dijkstra import (
+    DijkstraWork, dendrite_dijkstra_6dir, reconstruct_path,
+)
 from .neural_volume import NeuralVolumeResult
 
 
@@ -910,6 +912,25 @@ def grow_neuron_dendrites(
     for kk in range(N_neur):
         gp_soma_out.append((gp_soma_input[kk], np.array([], dtype=np.int32)))
 
+    # Reusable per-neuron scratch buffers. These are all sized to the fine
+    # subvolume (fdims), which is constant across neurons, so we allocate once
+    # and reset in place each iteration instead of reallocating O(volume)
+    # arrays per neuron. Each buffer is reset before its first read inside the
+    # loop (the early `continue`s occur before any buffer use).
+    n_fine_buf = int(np.prod(fdims))
+    cost_fine_6dir = np.empty((*tuple(fdims), 6), dtype=np.float32)
+    # Accumulators start zero and are reset touched-only at the end of each
+    # iteration (every nonzero cell is a subset of fine_idxs3), so they re-enter
+    # each iteration fully cleared without an O(volume) fill.
+    fine_paths_idx = np.zeros(tuple(fdims), dtype=np.float32)
+    fine_paths_val = np.zeros(tuple(fdims), dtype=np.float32)
+    fine_paths_ad = np.zeros(tuple(fdims), dtype=bool)
+    fine_paths_neuron_id = np.zeros(tuple(fdims), dtype=np.float32)
+    # Must start fully -1: the touched-only path_from reset only clears cells
+    # written by the previous call.
+    path_from_f_out = np.full((*tuple(fdims), 3), -1, dtype=np.int32)
+    dijkstra_work = DijkstraWork(n_fine_buf)
+
     # --- Grow dendrites for each neuron ---
     for j in range(N_neur):
         if verbosity > 1:
@@ -1031,7 +1052,7 @@ def grow_neuron_dendrites(
         # Ensure root coarse cell is always in the path
         paths_coarse[tuple(root_coarse)] = True
 
-        cost_fine_6dir = np.full((*tuple(fdims), 6), np.inf, dtype=np.float32)
+        cost_fine_6dir[:] = np.inf
 
         den_locs = np.flatnonzero(paths_coarse)
         for loc in den_locs:
@@ -1086,16 +1107,18 @@ def grow_neuron_dendrites(
             cost_fine_6dir.transpose(2, 1, 0, 3)
         ).reshape(n_fine, 6)
 
-        # Run fine Dijkstra (6-directional)
+        # Run fine Dijkstra (6-directional), reusing scratch buffers.
         _, path_from_f = dendrite_dijkstra_6dir(
             cost_fine_flat,
             tuple(fdims),
             tuple(root_fine),
             use_numba=True,
+            work=dijkstra_work,
+            path_from_out=path_from_f_out,
         )
 
         # --- Retrieve fine paths and compute thickness ---
-        fine_paths_idx = np.zeros(tuple(fdims), dtype=np.float32)
+        # (accumulators are already cleared — see touched-only reset below)
         fine_idxs = []
         allpaths = [None] * nends
 
@@ -1137,7 +1160,6 @@ def grow_neuron_dendrites(
             )
 
         # Apical dendrites
-        fine_paths_val = np.zeros(tuple(fdims), dtype=np.float32)
         fine_idxs2 = []
 
         for i in range(num_at):
@@ -1163,7 +1185,6 @@ def grow_neuron_dendrites(
 
         # Apply Rall's law to apical dendrites
         fine_idxs2_unique = np.unique(fine_idxs2).astype(int)
-        fine_paths_ad = np.zeros(tuple(fdims), dtype=bool)
         if len(fine_idxs2_unique) > 0:
             fine_paths_ad.ravel()[fine_idxs2_unique] = True
             fine_paths_val.ravel()[fine_idxs2_unique] = (
@@ -1198,7 +1219,6 @@ def grow_neuron_dendrites(
         fine_idxs3 = np.unique(all_fine).astype(int)
 
         # Create local neuron ID volume
-        fine_paths_neuron_id = np.zeros(tuple(fdims), dtype=np.float32)
         if len(fine_idxs3) > 0:
             fine_paths_neuron_id.ravel()[fine_idxs3] = j + 1
         if len(new_voxels) > 0:
@@ -1236,6 +1256,14 @@ def grow_neuron_dendrites(
             cell_volume_idx.ravel()[global_flat] += fine_paths_neuron_id.ravel()[fi]
             cell_volume_val.ravel()[global_flat] += fine_paths_val.ravel()[fi]
             cell_volume_ad.ravel()[global_flat] |= fine_paths_ad.ravel()[fi]
+
+        # Touched-only reset: every nonzero accumulator cell this iteration is a
+        # subset of fine_idxs3, so clearing those restores the all-zero invariant
+        # for the next neuron without an O(volume) fill.
+        fine_paths_idx.ravel()[fine_idxs3] = 0.0
+        fine_paths_val.ravel()[fine_idxs3] = 0.0
+        fine_paths_neuron_id.ravel()[fine_idxs3] = 0.0
+        fine_paths_ad.ravel()[fine_idxs3] = False
 
         gp_soma_out[j] = (gp_soma_input[j], new_voxels)
 
@@ -1416,8 +1444,14 @@ def grow_apical_dendrites(
     cell_volume_idx = np.zeros(tuple(fulldims), dtype=np.float32)
     cell_volume_val = np.zeros(tuple(fulldims), dtype=np.float32)
 
-    # Pre-allocate fine cost matrix (reused across iterations)
+    # Pre-allocate fine-subvolume scratch (reused across iterations) — sized to
+    # fdims, constant across dendrites, reset in place each iteration.
     ML = np.full((*tuple(fdims), 6), np.inf, dtype=np.float32)
+    # Starts zero; reset touched-only (at local_indices) after each write-back.
+    finepathsVal = np.zeros(tuple(fdims), dtype=np.float32)
+    # Must start fully -1 for the touched-only path_from reset.
+    path_from_f_out = np.full((*tuple(fdims), 3), -1, dtype=np.int32)
+    dijkstra_work = DijkstraWork(int(np.prod(fdims)))
 
     # --- Main loop: grow each through-volume dendrite (MATLAB lines 147-293) ---
     for j in range(N_den):
@@ -1563,11 +1597,12 @@ def grow_apical_dendrites(
         ).reshape(n_fine, 6)
 
         _, path_from_f = dendrite_dijkstra_6dir(
-            cost_fine_flat, tuple(fdims), tuple(rootL_fine), use_numba=True
+            cost_fine_flat, tuple(fdims), tuple(rootL_fine), use_numba=True,
+            work=dijkstra_work, path_from_out=path_from_f_out,
         )
 
         # 3f. Fine path weights (MATLAB lines 232-244)
-        finepathsVal = np.zeros(tuple(fdims), dtype=np.float32)
+        # (finepathsVal is already cleared — see touched-only reset below)
         for i in range(num_endpoints):
             path = _get_dendrite_path(path_from_f, endsA[i], rootL_fine)
             if len(path) == 0:
@@ -1621,6 +1656,9 @@ def grow_apical_dendrites(
                 cell_volume.ravel()[gf] += finepathsIdx.ravel()[li]
                 cell_volume_val.ravel()[gf] += finepathsVal.ravel()[li]
                 cell_volume_idx.ravel()[gf] += finepathsIdx.ravel()[li]
+
+        # Touched-only reset: local_indices are exactly the nonzero cells.
+        finepathsVal.ravel()[local_indices] = 0.0
 
         if verbosity > 1:
             n_voxels = int(np.sum(finepathsIdx > 0))
