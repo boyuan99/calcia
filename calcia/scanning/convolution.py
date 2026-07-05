@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import Optional, Sequence, Tuple
 
 import numpy as np
+from scipy import fft as _spfft   # multi-threaded FFT (workers=-1 uses all cores)
 
 
 def nearest_small_prime(n: int, max_factor: int = 7) -> int:
@@ -87,8 +88,8 @@ def psf_fft(
     )
     fft_shape = _nearest_small_prime_vec(conv_shape)
 
-    # 2-D FFT along axes 0 and 1 for each z-slice
-    return np.fft.fft2(psf_sub, s=fft_shape, axes=(0, 1))
+    # 2-D FFT along axes 0 and 1 for each z-slice (multi-threaded over z)
+    return _spfft.fft2(psf_sub, s=fft_shape, axes=(0, 1), workers=-1)
 
 
 # ------------------------------------------------------------------
@@ -130,11 +131,14 @@ def single_scan(
 
     fft_shape = (freq_psf.shape[0], freq_psf.shape[1])
 
-    # FFT-based convolution: FFT2(vol) * FFT2(psf), sum over z, IFFT2
-    freq_vol = np.fft.fft2(vol_sub, s=fft_shape, axes=(0, 1))
-    scan_full = np.fft.ifft2(
+    # FFT-based convolution: FFT2(vol) * FFT2(psf), sum over z, IFFT2.
+    # Multi-threaded (workers=-1): the 2-D FFT batches over the z-axis, so it
+    # parallelises across cores — this is the Phase-4 bottleneck on many-core
+    # machines where numpy's single-threaded FFT wastes most of the CPU.
+    freq_vol = _spfft.fft2(vol_sub, s=fft_shape, axes=(0, 1), workers=-1)
+    scan_full = _spfft.ifft2(
         np.sum(freq_vol * freq_psf, axis=2),
-        axes=(0, 1),
+        axes=(0, 1), workers=-1,
     ).real
 
     # Crop to valid convolution region (matching MATLAB cropping)

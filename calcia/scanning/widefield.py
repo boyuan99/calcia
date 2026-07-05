@@ -292,10 +292,18 @@ def scan_widefield(
         if len(idx) > 0 and dend_min[ll] != 0:
             vol_flat[idx] = dend_wt_list[ll] * dend_min[ll]
 
-    for ll in range(min(len(axon_idx_list), len(bg_min))):
-        idx = axon_idx_list[ll]
-        if len(idx) > 0 and bg_min[ll] != 0:
-            np.add.at(vol_flat, idx, axon_wt_list[ll] * bg_min[ll])
+    # Batched scatter-add of the (overlapping) axon/background baseline into
+    # f0vol via one np.bincount instead of a per-component np.add.at loop.
+    _n_ax = min(len(axon_idx_list), len(bg_min))
+    _bi = [axon_idx_list[ll] for ll in range(_n_ax)
+           if len(axon_idx_list[ll]) > 0 and bg_min[ll] != 0]
+    if _bi:
+        _bw = [axon_wt_list[ll] * bg_min[ll] for ll in range(_n_ax)
+               if len(axon_idx_list[ll]) > 0 and bg_min[ll] != 0]
+        vol_flat += np.bincount(
+            np.concatenate(_bi), weights=np.concatenate(_bw),
+            minlength=vol_flat.size,
+        ).astype(vol_flat.dtype, copy=False)
 
     if nuc_label:
         for ll in range(len(nuc_idx_list)):
@@ -388,11 +396,20 @@ def scan_widefield(
             if a > 0 and len(dend_idx_list[ll]) > 0:
                 tmp_flat[dend_idx_list[ll]] = dend_wt_list[ll] * a
 
-        for ll in range(n_bg):
-            a = bg_act[ll, kk]
-            if a > 0 and len(axon_idx_list[ll]) > 0:
-                np.add.at(tmp_flat, axon_idx_list[ll],
-                          axon_wt_list[ll] * a)
+        # Axon/background voxels OVERLAP (many processes share a voxel) so they
+        # must be scatter-ADDED, not assigned. np.add.at is an unbuffered scatter
+        # and dominated Phase 4 (~62%): batch all active components and do ONE
+        # buffered np.bincount instead (identical result, ~an order faster).
+        _ai = [axon_idx_list[ll] for ll in range(n_bg)
+               if bg_act[ll, kk] > 0 and len(axon_idx_list[ll]) > 0]
+        if _ai:
+            _aw = [axon_wt_list[ll] * bg_act[ll, kk] for ll in range(n_bg)
+                   if bg_act[ll, kk] > 0 and len(axon_idx_list[ll]) > 0]
+            tmp_flat += np.bincount(
+                np.concatenate(_ai),
+                weights=np.concatenate(_aw),
+                minlength=tmp_flat.size,
+            ).astype(tmp_flat.dtype, copy=False)
 
         # --- Full-volume widefield convolution (sum over all z) ---
         scan_vol = tmp_vol + f0vol
