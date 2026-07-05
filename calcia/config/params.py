@@ -658,6 +658,12 @@ class CameraNoiseParams:
         gain_e_per_adu: Conversion gain (electrons per ADU).
         bit_depth: ADC bit depth (output is clipped to [0, 2**bit_depth - 1]).
         pixel_gain_sigma: Fixed-pattern PRNU sigma. Set to 0 to disable.
+        bias: ADC bias offset in ADU, added after digitization. Default 0
+            (disabled) to keep the isolated noise model backward-compatible.
+            Every real sCMOS/CCD sits on a positive pedestal (typ. ~100 ADU)
+            so that read noise does not clip at zero; it also lumps in any
+            uniform background floor. Real striatum window tiffs sit at ~470
+            ADU (see striatum_cam()).
     """
     qe: float = 0.8
     dark_rate: float = 0.3
@@ -666,6 +672,7 @@ class CameraNoiseParams:
     gain_e_per_adu: float = 1.0
     bit_depth: int = 16
     pixel_gain_sigma: float = 0.01
+    bias: float = 0.0
 
 
 # ---------------------------------------------------------------------------

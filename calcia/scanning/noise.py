@@ -185,7 +185,8 @@ def camera_noise(
     if read_noise > 0:
         total_e = total_e + rng.normal(0.0, read_noise, size=clean.shape)
 
-    # Stage 5: ADC
-    adu = np.round(total_e / gain)
+    # Stage 5: ADC (digitize, add bias pedestal, clip to ADC range)
+    bias = getattr(cam_params, "bias", 0.0)
+    adu = np.round(total_e / gain) + bias
     adu = np.clip(adu, 0.0, max_adu).astype(np.float32)
     return adu
