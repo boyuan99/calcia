@@ -78,14 +78,30 @@ def simulate_optical_propagation_widefield(
     Ny_psf = int(round(psf_params.psf_sz[1] * vres))
     sampling = (1.0 / vres, 1.0 / vres, 1.0 / vres)
 
-    psf, _, _, _ = gaussian_psf_na(
-        na=psf_params.obj_na,
-        lambda_um=psf_params.lambda_em_um,
-        sampling=sampling,
-        mat_size=(Nx_psf, Ny_psf, Nz_vol),
-        nidx=psf_params.n,
-        scaling="widefield",
-    )
+    # Focal plane: gaussian_psf_na is sharpest at the CENTRE of its z-range.
+    # Legacy (wf_focal_depth_um=None) uses a Nz_vol PSF -> in-focus at mid-
+    # depth, which for a scatter-limited window prep wrongly leaves the bright
+    # surface layer defocused. When wf_focal_depth_um is set, generate a
+    # double-height PSF and slice it so the in-focus plane lands at the
+    # requested depth (0 = surface): vol z-plane k is convolved with psf slice
+    # k, whose defocus is |k - k_focus|.
+    focal_um = getattr(psf_params, "wf_focal_depth_um", None)
+    if focal_um is None:
+        psf, _, _, _ = gaussian_psf_na(
+            na=psf_params.obj_na, lambda_um=psf_params.lambda_em_um,
+            sampling=sampling, mat_size=(Nx_psf, Ny_psf, Nz_vol),
+            nidx=psf_params.n, scaling="widefield",
+        )
+    else:
+        k_focus = int(round(min(max(focal_um, 0.0),
+                                (Nz_vol - 1) / vres) * vres))
+        psf_full, _, _, _ = gaussian_psf_na(
+            na=psf_params.obj_na, lambda_um=psf_params.lambda_em_um,
+            sampling=sampling, mat_size=(Nx_psf, Ny_psf, 2 * Nz_vol),
+            nidx=psf_params.n, scaling="widefield",
+        )
+        # psf_full is in-focus at index Nz_vol; slice so vol z=k_focus is sharp.
+        psf = psf_full[:, :, (Nz_vol - k_focus):(2 * Nz_vol - k_focus)]
 
     # Energy-conserving per-slice normalization (lateral redistribution of
     # photons by defocus conserves integral) then multiply by tissue

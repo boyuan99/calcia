@@ -353,6 +353,12 @@ class PsfParams:
     hemo_abs_wf: float = field(
         default_factory=lambda: 0.00674 * math.log(10) * 30.0
     )
+    # Widefield focal-plane depth (um below the volume top). None = legacy
+    # behaviour (in-focus at the MIDDLE of the volume, which for a scatter-
+    # limited window prep leaves the bright surface layer defocused). Set to
+    # 0.0 to focus at the surface (imaging-window prep): the bright, least-
+    # scattered top layer is sharp and deeper planes provide out-of-focus haze.
+    wf_focal_depth_um: Optional[float] = None
     prop_crop: bool = True
     fast_mask: bool = True
     fm_sampling: float = 10.0
