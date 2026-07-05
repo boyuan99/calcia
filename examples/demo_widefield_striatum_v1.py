@@ -3,9 +3,14 @@
 1P widefield simulation sized for striatum imaging via a cranial window
 over the exposed striatum surface.
 
-Default config (the long run):
-  - vol_sz = (500, 500, 300) um   vol_depth = 0   vres = 2
-  - nt = 300 frames @ 30 Hz (10 s)
+Default config (the long run) — imaging-window prep, NOT a GRIN miniscope:
+  - vol_sz = (1500, 1500, 150) um   vol_depth = 0   vres = 1
+    (large ~1.5 mm window FOV; thin ~150 um scatter-limited 1P depth)
+  - N_neur = 1000 cleanly-resolvable cells via SPARSE labelling
+    (~3% of anatomical density, ~440 cells/mm^2 projected). The anatomical
+    neur_density default would instead give ~33,750 overlapping/washed cells.
+  - nt = 200 frames @ 20 Hz (10 s) — matches the real striatum window
+    recordings (200-frame, ~1.7 mm FOV, GCaMP tiffs)
   - prot = GCaMP6f (placeholder; GCaMP8f is not in the protein table yet)
 
 Smoke test (--smoke):
@@ -67,6 +72,10 @@ def parse_args():
                    help="Medium volume (250x250x100, 300 frames) — large "
                         "enough to assess background wash-out")
     p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--vol-um", type=int, default=None, dest="vol_um",
+                   help="Lateral FOV in um for the full run (square). Overrides "
+                        "the (1000) preset; depth stays 60 um. Use 1700 to cover "
+                        "the full ~1.7 mm real-sample FOV.")
     p.add_argument("--nt", type=int, default=None,
                    help="Number of frames (overrides preset)")
     p.add_argument("--rate", type=float, default=0.02,
@@ -81,21 +90,51 @@ def parse_args():
     p.add_argument("--burst-mean", type=int, default=0, dest="burst_mean",
                    help="Mean intra-burst spike count (burst mode). 0 = single "
                         "spikes / pure Poisson. Default 0")
-    p.add_argument("--bg-scale", type=float, default=0.1, dest="bg_scale",
-                   help="Neuropil/axon trace amplitude scale. The dense axon "
+    p.add_argument("--bg-scale", type=float, default=1.0, dest="bg_scale",
+                   help="Neuropil/axon trace amplitude scale. Default 1.0 (raw "
+                        "NAOMi wash) for the DENSE/washed striatum mode: bright "
+                        "neuropil fills the field into a smooth cloud like the "
+                        "real samples. Use 0.1 for the old sparse de-washed mode "
+                        "where individual cells are visible. The dense axon "
                         "background is the dominant 1P widefield wash-out source; "
                         "0.1 takes brightest-frame spatial CV from ~0.65 to ~0.95 "
                         "(cells become visible). 1.0 = raw NAOMi amplitude "
                         "(washed). Default 0.1")
-    p.add_argument("--vres", type=int, default=2,
-                   help="Voxels per um (default 2; use 1 to cut memory ~8x)")
+    p.add_argument("--vres", type=int, default=None,
+                   help="Voxels per um (overrides preset; smoke/medium default "
+                        "2, full-run defaults to 1 because the 1.5 mm window FOV "
+                        "would otherwise need ~10 GB/array). Use 1 to cut memory "
+                        "~8x")
+    p.add_argument("--n-neur", type=int, default=None, dest="n_neur",
+                   help="Number of fluorescing (labelled) neurons. Overrides the "
+                        "preset. The full run targets ~1000 cleanly-resolvable "
+                        "cells (sparse Cre+virus labelling, ~3%% of anatomical "
+                        "density); leave None on smoke/medium to use the full "
+                        "anatomical density (neur_density-driven).")
+    p.add_argument("--soma-gain", type=float, default=None, dest="soma_gain",
+                   help="Multiply soma-voxel fluorescence by this factor after "
+                        "Phase 1 (values-only rescale of gp_vals via soma_mask; "
+                        "no shape re-run). Real GCaMP concentrates in the soma, "
+                        "so somata should outshine neuropil; the raw NAOMi values "
+                        "leave them ~equal, washed out by out-of-focus dendrite "
+                        "haze in widefield. Full-run default 3.0 lifts mean-image "
+                        "CV from ~0.44 toward the real ~0.73 (cells become "
+                        "visible). 1.0 = no boost.")
+    p.add_argument("--no-illum", action="store_true",
+                   help="Disable the non-uniform (Gaussian) widefield "
+                        "illumination profile. The full run applies it by "
+                        "default: real 1P widefield is dominated by a bright-"
+                        "centre/dark-edge illumination gradient (LED beam + "
+                        "window vignetting) that NAOMi's uniform model lacks — "
+                        "it is the single biggest visual difference from the "
+                        "real striatum samples.")
     p.add_argument("--prot", type=str, default="GCaMP6f")
     return p.parse_args()
 
 
-def phase1_signature(vol_sz, vol_depth, vres, seed, region):
+def phase1_signature(vol_sz, vol_depth, vres, seed, region, n_neur):
     h = hashlib.sha1()
-    h.update(repr((tuple(vol_sz), vol_depth, vres, seed, region)).encode())
+    h.update(repr((tuple(vol_sz), vol_depth, vres, seed, region, n_neur)).encode())
     return h.hexdigest()[:10]
 
 
@@ -115,27 +154,75 @@ def main():
     args = parse_args()
 
     # -------- resolve config --------
+    # Each preset carries its own default vres and N_neur. The full run models
+    # an imaging-window prep (NOT a GRIN miniscope): a large ~1.5 mm FOV but
+    # only a thin ~150 um scatter-limited depth. ~1000 cleanly-resolvable cells
+    # are placed by SPARSE labelling (N_neur=1000 ~ 3% of anatomical density,
+    # areal ~440 cells/mm^2), not by the full anatomical neur_density default
+    # (which would give ~33,750 overlapping/washed neurons here). vres defaults
+    # to 1 for the full run because vres=2 would need ~10 GB/array at this FOV.
+    # Each preset is a StriatumConfig (single source of truth). smoke/medium are
+    # "clean" physical runs (no illum gradient / soma boosting / blur cosmetics);
+    # the full run is the DENSE/WASHED main line (anatomical density + bg_scale
+    # ~1.0 + cosmetics) that matches the real striatum samples. 1P widefield only
+    # images ~50-80 um deep, so the volume is a shallow 60 um.
     if args.smoke:
-        vol_sz = (80, 80, 50)
-        nt = args.nt if args.nt is not None else 30
         tag = "striatum_smoke"
+        cfg = C.StriatumConfig(
+            vol_um=80, depth_um=50, vres=2,
+            nt=(args.nt if args.nt is not None else 30),
+            solid_soma=False, bright_frac=0.0, oof_blur_um=0.0,
+            illum=C.IllumConfig(enable=False))
     elif args.medium:
-        vol_sz = (250, 250, 100)
-        nt = args.nt if args.nt is not None else 300
         tag = "striatum_medium"
+        cfg = C.StriatumConfig(
+            vol_um=250, depth_um=100, vres=2,
+            nt=(args.nt if args.nt is not None else 300),
+            solid_soma=False, bright_frac=0.0, oof_blur_um=0.0,
+            illum=C.IllumConfig(enable=False))
     else:
-        vol_sz = (500, 500, 300)
-        nt = args.nt if args.nt is not None else 300
         tag = "striatum_v1"
-    vol_depth = 0
-    vres = args.vres
-    seed = args.seed
-    rate = args.rate
-    smod = args.smod
-    burst_mean = args.burst_mean
-    bg_scale = args.bg_scale
-    prot = args.prot
-    dt = 1.0 / 30
+        cfg = C.StriatumConfig(
+            vol_um=(args.vol_um if args.vol_um is not None else 1000),
+            depth_um=60, vres=1,
+            nt=(args.nt if args.nt is not None else 200))
+
+    # CLI overrides applied to every preset
+    cfg.seed = args.seed
+    cfg.rate = args.rate
+    cfg.smod = args.smod
+    cfg.burst_mean = args.burst_mean
+    cfg.bg_scale = args.bg_scale
+    cfg.prot = args.prot
+    if args.vres is not None:
+        cfg.vres = args.vres
+    if args.n_neur is not None:
+        cfg.n_neur = args.n_neur
+    if args.soma_gain is not None:
+        cfg.soma_gain = args.soma_gain
+    if args.no_illum:
+        cfg.illum.enable = False
+
+    # Derived locals (the pipeline body below reads these; cfg stays the single
+    # source they come from).
+    vol_sz = cfg.vol_sz
+    vol_depth = cfg.vol_depth
+    vres = cfg.vres
+    n_neur = cfg.n_neur
+    nt = cfg.nt
+    soma_gain = cfg.soma_gain
+    solid_soma = cfg.solid_soma
+    bright_frac = cfg.bright_frac
+    bright_gain = cfg.bright_gain
+    oof_blur_um = cfg.oof_blur_um
+    illum_grad = cfg.illum.enable
+    seed = cfg.seed
+    rate = cfg.rate
+    smod = cfg.smod
+    burst_mean = cfg.burst_mean
+    bg_scale = cfg.bg_scale
+    prot = cfg.prot
+    dt = cfg.dt
 
     ts = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
     run_dir = os.path.join(OUTPUT_ROOT, f"{tag}_{ts}")
@@ -148,6 +235,10 @@ def main():
     print(f"  Run dir:   {run_dir}")
     print(f"  Volume:    {vol_sz} um   vol_depth={vol_depth}   vres={vres}")
     print(f"  Voxels:    {n_vox:,}  ({n_vox * 4 / 1e9:.2f} GB / float32 array)")
+    print(f"  Neurons:   N_neur={n_neur if n_neur is not None else 'density-driven'}"
+          + (f"  (~{n_neur/(np.prod(vol_sz)/1e9):.0f}/mm^3, "
+             f"{n_neur/(vol_sz[0]*vol_sz[1]/1e6):.0f}/mm^2 projected)"
+             if n_neur is not None else ""))
     print(f"  Frames:    {nt} ({nt * dt:.1f} s at {1/dt:.0f} Hz)")
     print(f"  Seed:      {seed}   prot={prot}")
     print(f"  Spikes:    smod={smod}  rate={rate}  burst_mean={burst_mean}"
@@ -161,19 +252,16 @@ def main():
         simulate_optical_propagation,
         generate_time_traces,
     )
-    from calcia.config.params import CalciumParams, VolumeParams
     from calcia.scanning import scan_widefield
 
     timings = {}
     profiler = Profiler()
-    vol_params = VolumeParams(
-        vol_sz=vol_sz, vres=vres, vol_depth=vol_depth, region="striatum",
-    )
+    vol_params = cfg.build_vol_params()
 
     # ==================================================================
     # Phase 1: Neural volume (shared cache keyed on geometry params)
     # ==================================================================
-    sig = phase1_signature(vol_sz, vol_depth, vres, seed, "striatum")
+    sig = phase1_signature(vol_sz, vol_depth, vres, seed, "striatum", n_neur)
     phase1_cache = os.path.join(SHARED_DIR, f"phase1_{sig}.pkl")
     print(f"\n[PHASE 1] Neural volume   (sig={sig})")
     print(f"  shared cache: {phase1_cache}")
@@ -200,6 +288,68 @@ def main():
     print(f"  done in {timings['phase1']:.1f}s   "
           f"N_neur={vol_params.N_neur}  grid={vol_out.neur_vol.shape}")
 
+    # SOMA BRIGHTNESS re-calibration (post-Phase-1, NOT baked into the shared
+    # cache). Real GCaMP concentrates in the soma cytoplasm, so somata outshine
+    # the neuropil; raw NAOMi values make them ~equal, so the sparse somata get
+    # washed out by out-of-focus dendrite haze in widefield (soma/bg contrast
+    # ~1.0, mean-image CV ~0.44 vs real ~0.73). Boosting soma-voxel fluorescence
+    # (values-only rescale via soma_mask — no shape re-run) lifts cells above
+    # the haze so they are visible.
+    if soma_gain != 1.0:
+        n_boost = 0
+        for cfd in vol_out.gp_vals:
+            sm = np.asarray(cfd.soma_mask)
+            if sm.any():
+                cfd.fluorescence[sm] *= soma_gain
+                n_boost += 1
+        print(f"  soma_gain={soma_gain}: boosted {n_boost} soma footprints")
+
+    # SOLID SOMA: make cells SOLID bright blobs, not rings. NAOMi gives the
+    # nucleus zero fluorescence (nuc_fluorsc=0), leaving a dark centre (the
+    # cytoplasmic-GCaMP "ring"), but the real washed 1P samples show cells as
+    # solid light blobs. Merge each nucleus's voxels into its soma footprint
+    # with the soma's own (median) fluorescence + soma_mask, so the nucleus is
+    # as bright AND activity-modulated as the cytoplasm. Values-only edit of the
+    # cached volume (no shape re-run).
+    if solid_soma:
+        n_solid = 0
+        for i in range(min(len(vol_out.gp_vals), len(vol_out.gp_nuc))):
+            nuc_idx = np.asarray(vol_out.gp_nuc[i][0])
+            cfd = vol_out.gp_vals[i]
+            sm = np.asarray(cfd.soma_mask)
+            if len(nuc_idx) == 0 or not sm.any():
+                continue
+            fill = float(np.median(cfd.fluorescence[sm]))
+            cfd.indices = np.concatenate([cfd.indices, nuc_idx])
+            cfd.fluorescence = np.concatenate(
+                [cfd.fluorescence,
+                 np.full(len(nuc_idx), fill, cfd.fluorescence.dtype)])
+            cfd.soma_mask = np.concatenate([sm, np.ones(len(nuc_idx), bool)])
+            n_solid += 1
+        vol_out.gp_nuc = [(np.array([], dtype=np.int64), 0.0)
+                          for _ in vol_out.gp_nuc]
+        print(f"  solid_soma: filled {n_solid} nuclei -> solid cells (no rings)")
+
+    # BRIGHTNESS HETEROGENEITY: the real 1P data is a STRONG washed background
+    # with a SUBSET of neurons that stay clearly resolvable on top (heterogeneous
+    # GCaMP expression / activity). A UNIFORM wash (post-blur) wrongly smears
+    # those clear cells away. Instead boost a random fraction of somata so they
+    # stand out sharply while the rest blend into the dense neuropil haze — no
+    # uniform blur needed. Values-only edit; subset is seed-reproducible.
+    if bright_frac > 0.0:
+        soma_ids = [i for i, cfd in enumerate(vol_out.gp_vals)
+                    if np.any(np.asarray(cfd.soma_mask))]
+        rng = np.random.default_rng(seed + 1)
+        n_bright = int(round(bright_frac * len(soma_ids)))
+        bright_ids = set(rng.choice(soma_ids, n_bright, replace=False)
+                         .tolist()) if n_bright else set()
+        for i in bright_ids:
+            cfd = vol_out.gp_vals[i]
+            sm = np.asarray(cfd.soma_mask)
+            cfd.fluorescence[sm] *= bright_gain
+        print(f"  bright_frac={bright_frac}: {n_bright}/{len(soma_ids)} somata "
+              f"x{bright_gain} (clear cells on washed background)")
+
     # CHECKPOINT: per-cell footprints (from Phase 1) — save immediately
     with open(os.path.join(run_dir, "cell_footprints.pkl"), "wb") as f:
         pickle.dump(dict(
@@ -215,7 +365,7 @@ def main():
     # ==================================================================
     print("\n[PHASE 2] Optical propagation (widefield)")
     t0 = time.time()
-    psf_params = C.striatum_psf()
+    psf_params = cfg.build_psf()
     profiler.start()
     opt_out = simulate_optical_propagation(
         vol_params=vol_params, psf_params=psf_params,
@@ -243,10 +393,8 @@ def main():
     t0 = time.time()
     K = len(vol_out.gp_vals)
     has_axons = len(vol_out.bg_proc) > 0
-    spike_params = C.striatum_spike(
-        K, nt, dt, has_axons, rate=rate, prot=prot, smod=smod,
-        burst_mean=burst_mean, bg_scale=bg_scale, verbose=1)
-    cal_params = CalciumParams(prot_type=prot.lower())
+    spike_params = cfg.build_spike(K, has_axons)
+    cal_params = cfg.build_cal()
     profiler.start()
     time_out = generate_time_traces(
         spike_params=spike_params, cal_params=cal_params,
@@ -262,27 +410,55 @@ def main():
 
     # CHECKPOINT: traces + spikes (ground truth) — save immediately, this is
     # the critical demixing ground truth and protects against a Phase 4 crash.
+    #
+    # SELF-DESCRIBING LAYOUT: the per-component trace arrays hold BOTH the real
+    # neuron somata AND the appended background/neuropil processes, so their row
+    # count (e.g. 2321) is NOT the neuron count. The pipeline appends bg
+    # dendrites AFTER the somata, so the somata are the contiguous prefix
+    # [:n_soma]. We store n_soma explicitly and pre-split the ground-truth
+    # neuron rows so downstream code never has to read the log or reverse-
+    # engineer footprint sizes. n_soma is counted from soma_mask (robust to
+    # placing fewer cells than N_neur requested). locs[:n_soma] are the soma
+    # centres (verified C-order aligned with the somatic rows).
+    gp = vol_out.gp_vals
+    n_soma = sum(1 for g in gp
+                 if getattr(g, "soma_mask", None) is not None
+                 and np.any(np.asarray(g.soma_mask)))
+    locs = np.asarray(vol_out.locs)
+    soma = time_out.soma.astype(np.float32)
+    spikes = (time_out.spikes if time_out.spikes is not None
+              else np.zeros((0, nt), dtype=np.uint8))
     traces = dict(
-        soma=time_out.soma.astype(np.float32),
-        spikes=(time_out.spikes if time_out.spikes is not None
-                else np.zeros((0, nt), dtype=np.uint8)),
-        locs=vol_out.locs,
+        n_soma=np.int64(n_soma),          # split point: rows [:n_soma] = neurons
+        trace_axes=np.array("KT"),        # trace arrays are (K=component, T=frame)
+        locs_axes=np.array("Kxyz"),       # locs are (K, 3) voxel coords x,y,z
+        soma=soma,                        # full per-component (neurons + bg)
+        spikes=spikes,
+        locs=locs,
+        soma_neurons=soma[:n_soma],       # ground-truth: the real cell somata
+        soma_locs=locs[:n_soma],          # their centres (x,y,z voxels)
     )
+    if spikes.shape[0] == soma.shape[0]:
+        traces["spikes_neurons"] = spikes[:n_soma]
     if time_out.dend is not None:
-        traces["dend"] = time_out.dend.astype(np.float32)
+        dend = time_out.dend.astype(np.float32)
+        traces["dend"] = dend
+        traces["dend_neurons"] = dend[:n_soma]
     if time_out.bg is not None:
         traces["bg"] = time_out.bg.astype(np.float32)
     np.savez_compressed(os.path.join(run_dir, "traces.npz"), **traces)
-    print("  checkpoint: traces.npz")
+    print(f"  checkpoint: traces.npz  ({n_soma} real neurons + "
+          f"{soma.shape[0] - n_soma} background components; "
+          f"use soma_neurons / n_soma)")
 
     # ==================================================================
     # Phase 4: Widefield camera scan
     # ==================================================================
     print("\n[PHASE 4] Widefield camera scanning")
     t0 = time.time()
-    scan_params = C.striatum_scan(verbose=1)
-    wf_params = C.striatum_wf()
-    cam_params = C.striatum_cam(dt)
+    scan_params = cfg.build_scan()
+    wf_params = cfg.build_wf()
+    cam_params = cfg.build_cam()
     profiler.start()
     scan_out = scan_widefield(
         vol_out=vol_out, opt_out=opt_out, time_out=time_out,
@@ -294,6 +470,34 @@ def main():
     profiler.reset()
     timings["phase4"] = time.time() - t0
     print(f"  done in {timings['phase4']:.1f}s   movie {scan_out.mov.shape}")
+
+    # Out-of-focus haze (smoothing): real 1P widefield integrates a large
+    # defocused PSF over the whole depth, blurring the field into a SMOOTH
+    # washed cloud. NAOMi's widefield PSF keeps too much fine structure, so the
+    # raw sim field is grainy/speckled (dark-void area ~35% vs real ~1.7%). A
+    # spatial Gaussian on the signal (above the bias pedestal) approximates the
+    # extra out-of-focus blur and matches the real smoothness. ~20 um sigma.
+    bias = cam_params.bias
+    if illum_grad and oof_blur_um > 0:
+        from scipy.ndimage import gaussian_filter
+        blur_px = oof_blur_um * vres / scan_params.sfrac   # um -> movie px
+        for mv in (scan_out.mov, scan_out.mov_raw):
+            sig = mv - (bias if mv is scan_out.mov else 0.0)
+            sig = gaussian_filter(sig, sigma=(blur_px, blur_px, 0))
+            mv[...] = sig + (bias if mv is scan_out.mov else 0.0)
+        print(f"  applied out-of-focus blur ({oof_blur_um:.0f} um = {blur_px:.1f} px)")
+
+    # Non-uniform widefield illumination (bright centre -> dark edges) — the
+    # dominant visual feature of real 1P widefield that NAOMi's uniform model
+    # lacks. Excitation non-uniformity scales the photon signal, not the camera
+    # bias pedestal, so multiply the signal ABOVE the bias floor. Applied to
+    # both noisy and clean movies (mov is H x W x T).
+    if illum_grad:
+        illum = cfg.illum_map(scan_out.mov.shape[:2])[:, :, None]
+        scan_out.mov = (bias + (scan_out.mov - bias) * illum).astype(np.float32)
+        scan_out.mov_raw = (scan_out.mov_raw * illum).astype(np.float32)
+        print(f"  applied Gaussian illumination gradient "
+              f"(edge/centre = {illum.min():.2f})")
     print(f"  noisy [{scan_out.mov.min():.1f}, {scan_out.mov.max():.1f}]   "
           f"clean [{scan_out.mov_raw.min():.3g}, {scan_out.mov_raw.max():.3g}]")
 
@@ -304,14 +508,19 @@ def main():
     t0 = time.time()
 
     # 1. movies.npz (full-precision) — critical
+    # The internal pipeline uses (H, W, T) but the saved movie is transposed to
+    # (T, H, W) = (frames, height, width) so it matches the real striatum tiffs
+    # and the ImageJ/tifffile convention. `axes` labels it so the meaning of
+    # each dimension is unambiguous (frame axis first, not last).
     movies = dict(
-        mov_clean=scan_out.mov_raw.astype(np.float32),
-        mov_noisy=scan_out.mov.astype(np.float32),
+        mov_clean=np.transpose(scan_out.mov_raw, (2, 0, 1)).astype(np.float32),
+        mov_noisy=np.transpose(scan_out.mov, (2, 0, 1)).astype(np.float32),
+        axes=np.array("THW"),          # T=frames, H=height(Y), W=width(X)
     )
     if getattr(scan_out, "mot_hist", None) is not None:
-        movies["mot_hist"] = scan_out.mot_hist
+        movies["mot_hist"] = scan_out.mot_hist   # (3, T)
     np.savez_compressed(os.path.join(run_dir, "movies.npz"), **movies)
-    print("  saved movies.npz")
+    print(f"  saved movies.npz   mov_noisy {movies['mov_noisy'].shape} (T,H,W)")
 
     # 2. params.pkl — reproducibility
     with open(os.path.join(run_dir, "params.pkl"), "wb") as f:
@@ -326,13 +535,17 @@ def main():
     # 3. metadata.json
     meta = dict(
         tag=tag, smoke=args.smoke,
+        config=cfg.as_dict(),          # complete reproducible parameter record
         timestamp=_dt.datetime.now().isoformat(),
         seed=seed, region="striatum",
         vol_sz=list(vol_sz), vol_depth=vol_depth, vres=vres,
         nt=nt, dt=dt, prot=prot, rate=rate,
         smod=smod, burst_mean=burst_mean, bg_scale=bg_scale,
+        soma_gain=float(soma_gain),
+        illum_grad=bool(illum_grad),
         N_neur=int(vol_params.N_neur),
-        N_soma_traces=int(time_out.soma.shape[0]),
+        n_soma=int(n_soma),                       # real neurons placed (ground truth)
+        N_soma_traces=int(time_out.soma.shape[0]),  # incl. appended bg components
         total_spikes=n_spk,
         movie_shape=list(scan_out.mov.shape),
         timings_seconds={k: float(v) for k, v in timings.items()},

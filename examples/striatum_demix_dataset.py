@@ -33,8 +33,10 @@ FOCUS_SLAB_UM = 10.0
 
 def main():
     from calcia import simulate_optical_propagation, generate_time_traces
-    from calcia.config.params import CalciumParams
     from calcia.scanning import scan_widefield
+
+    # De-washed sparse mode (individual cells visible; no cosmetics).
+    cfg = C.StriatumConfig.dewashed(nt=NT, fps=1.0 / DT, seed=SEED)
 
     ts = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
     run_dir = os.path.join(OUTPUT_ROOT, f"striatum_demix_{ts}")
@@ -47,13 +49,13 @@ def main():
     print(f"  phase1 loaded {time.time()-t0:.0f}s  grid={vol_out.neur_vol.shape}")
 
     opt_out = simulate_optical_propagation(
-        vol_params=vol_params, psf_params=C.striatum_psf(),
+        vol_params=vol_params, psf_params=cfg.build_psf(),
         vol_out=vol_out, verbose=0)
 
     K = len(vol_out.gp_vals)
-    sp = C.striatum_spike(K, NT, DT, len(vol_out.bg_proc) > 0)
+    sp = cfg.build_spike(K, len(vol_out.bg_proc) > 0)
     time_out = generate_time_traces(
-        spike_params=sp, cal_params=CalciumParams(prot_type="gcamp6f"),
+        spike_params=sp, cal_params=cfg.build_cal(),
         n_locs=vol_out.locs, verbose=1)
     n_spk = int(time_out.spikes.sum()) if time_out.spikes is not None else 0
     print(f"  phase3 done  soma {time_out.soma.shape}  spikes={n_spk}")
@@ -62,8 +64,8 @@ def main():
     t0 = time.time()
     so = scan_widefield(
         vol_out=vol_out, opt_out=opt_out, time_out=time_out,
-        scan_params=C.striatum_scan(), cam_params=C.striatum_cam(DT),
-        wf_params=C.striatum_wf(), spike_params=sp, seed=SEED,
+        scan_params=cfg.build_scan(), cam_params=cfg.build_cam(),
+        wf_params=cfg.build_wf(), spike_params=sp, seed=SEED,
         separate_focus=True, focus_slab_um=FOCUS_SLAB_UM)
     scan_s = time.time() - t0
     print(f"  scan done {scan_s:.0f}s")

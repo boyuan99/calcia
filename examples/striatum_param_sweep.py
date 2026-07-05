@@ -29,6 +29,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 import _striatum_common as C
+from dataclasses import replace
 
 PHASE1 = os.path.join(os.path.dirname(__file__), "output", "_shared",
                       "phase1_f1d312ce32.pkl")
@@ -111,8 +112,10 @@ def main():
         return lst if args.max_per_axis is None else lst[:args.max_per_axis]
 
     from calcia import simulate_optical_propagation, generate_time_traces
-    from calcia.config.params import CalciumParams
     from calcia.scanning import scan_widefield
+
+    # De-washed sparse mode; the sweep overrides obj_na / scatter per PSF below.
+    cfg = C.StriatumConfig.dewashed(nt=nt, fps=1.0 / DT, seed=SEED)
 
     ts = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
     run_dir = os.path.join(OUTPUT_ROOT, f"param_sweep_{ts}")
@@ -130,17 +133,17 @@ def main():
     #      not component count, so traces stay valid). Calibrated defaults
     #      (bg_scale=0.1, burst) come from _striatum_common. ----
     K = len(vol_out.gp_vals)
-    sp = C.striatum_spike(K, nt, DT, len(vol_out.bg_proc) > 0, verbose=0)
+    sp = cfg.build_spike(K, len(vol_out.bg_proc) > 0, verbose=0)
     time_out = generate_time_traces(
-        spike_params=sp, cal_params=CalciumParams(prot_type="gcamp6f"),
+        spike_params=sp, cal_params=cfg.build_cal(),
         n_locs=vol_out.locs, verbose=0)
 
-    scan_params = C.striatum_scan(verbose=0)
-    cam_params = C.striatum_cam(DT)
-    wf_params = C.striatum_wf()
+    scan_params = cfg.build_scan(verbose=0)
+    cam_params = cfg.build_cam()
+    wf_params = cfg.build_wf()
 
     def make_psf(na=0.8, scatter=70.0):
-        return C.striatum_psf(obj_na=na, scatter_length_um_wf=scatter)
+        return replace(cfg, obj_na=na, scatter_length_um_wf=scatter).build_psf()
 
     def do_scan(vol, opt, sep=False, slab=None):
         return scan_widefield(
