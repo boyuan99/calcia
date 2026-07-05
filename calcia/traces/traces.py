@@ -28,6 +28,25 @@ from calcia.traces.spikes import bin_spike_trains, gen_burst_spike_times
 _L_BUFF: int = 500       # steady-state buffer (samples at 100 Hz)
 _SPIKE_DT: float = 1.0 / 100.0  # internal simulation rate
 
+
+def _warmup_buffer(spk: np.ndarray, n: int) -> np.ndarray:
+    """Build an ``n``-sample calcium warm-up prefix with the SAME spike
+    statistics as ``spk`` (tiled/wrapped), so the ODE calcium filter reaches
+    its ACTIVE stationary state before the kept recording window.
+
+    Prepending zeros (the previous behaviour) only settles the filter to the
+    zero-input resting baseline; the recording then starts dark and its
+    background visibly ramps up over the first few seconds as spikes
+    accumulate. Warming up with representative spikes removes that drift. The
+    buffer is discarded after filtering, so its exact pattern is irrelevant —
+    only its firing rate matters.
+    """
+    L = spk.shape[1]
+    if L == 0:
+        return np.zeros((spk.shape[0], n), dtype=spk.dtype)
+    reps = int(np.ceil(n / L))
+    return np.tile(spk, (1, reps))[:, :n].astype(spk.dtype, copy=True)
+
 # ---------------------------------------------------------------------------
 # Result dataclass
 # ---------------------------------------------------------------------------
@@ -377,8 +396,10 @@ def generate_time_traces(
                 spike_params.mu + spike_params.sig * np.random.randn(int(mask.sum()))
             )
     elif dyn_type in ("single", "Ca_DE", "double"):
+        # Warm up with representative spikes (not zeros) so the recording
+        # starts at the active stationary level, not a dark ramp-up.
         S_times = np.concatenate(
-            [np.zeros((K, _L_BUFF), dtype=np.float32), S_times], axis=1
+            [_warmup_buffer(S_times, _L_BUFF), S_times], axis=1
         )
         S_times = (7.6e-6) * S_times
 
@@ -447,8 +468,7 @@ def generate_time_traces(
                 )
         elif dyn_type in ("single", "Ca_DE", "double"):
             bg_times = np.concatenate(
-                [np.zeros((spike_params.N_bg, _L_BUFF), dtype=np.float32), bg_times],
-                axis=1,
+                [_warmup_buffer(bg_times, _L_BUFF), bg_times], axis=1,
             )
             bg_times = (7.6e-6) * bg_times
 
