@@ -34,6 +34,9 @@ examples/output/
 *.npz
 *.mat
 
+# Reference data (large binary/json files)
+/data/
+
 # Visualization export data (generated, not source)
 comparison_tools/*.json
 comparison_tools/*.png
