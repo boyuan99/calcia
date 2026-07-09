@@ -730,3 +730,152 @@ class TestScanWidefield:
         r2 = scan_widefield(vol_out, opt_out, time_out, **kw)
         np.testing.assert_array_equal(r1.mov_infocus, r2.mov_infocus)
         np.testing.assert_array_equal(r1.mov_oof, r2.mov_oof)
+
+    # ---- physio motion model (end-to-end) ----
+    def test_physio_motion_default_unchanged(self, synthetic_inputs):
+        """No motion_params (or randomwalk) => legacy integer-walk mot_hist."""
+        from calcia.scanning import scan_widefield
+        from calcia.config.params import MotionParams
+        vol_out, opt_out, time_out, spike_params = synthetic_inputs
+        sp = ScanParams(scan_buff=4, motion=True, sfrac=2, verbose=0)
+        r_none = scan_widefield(vol_out, opt_out, time_out, scan_params=sp,
+                                spike_params=spike_params, seed=3)
+        r_rw = scan_widefield(vol_out, opt_out, time_out, scan_params=sp,
+                              spike_params=spike_params,
+                              motion_params=MotionParams(model="randomwalk"),
+                              seed=3)
+        np.testing.assert_array_equal(r_none.mot_hist, r_rw.mot_hist)
+        # legacy shifts are integers
+        assert np.allclose(r_none.mot_hist, np.round(r_none.mot_hist))
+
+    def test_physio_motion_end_to_end(self, synthetic_inputs):
+        from calcia.scanning import scan_widefield
+        from calcia.config.params import MotionParams
+        vol_out, opt_out, time_out, spike_params = synthetic_inputs
+        sp = ScanParams(scan_buff=8, motion=True, sfrac=2, verbose=0)
+        mp = MotionParams(model="physio", seed=5)
+        r = scan_widefield(vol_out, opt_out, time_out, scan_params=sp,
+                           spike_params=spike_params, motion_params=mp, seed=1)
+        assert r.mov.shape[2] == time_out.soma.shape[1]
+        # physio z-row is always zero; xy shifts are bounded by scan_buff
+        assert np.all(np.abs(r.mot_hist[:2]) <= 8 + 1e-4)
+        assert np.all(r.mot_hist[2] == 0)
+
+    def test_physio_blur_hist_recorded(self, synthetic_inputs):
+        """physio run exposes a (2, Nt) blur_hist; it equals the thresholded
+        frame-to-frame shift difference (the streak smeared into each frame)."""
+        from calcia.scanning import scan_widefield
+        from calcia.config.params import MotionParams
+        vol_out, opt_out, time_out, spike_params = synthetic_inputs
+        sfrac = 2
+        sp = ScanParams(scan_buff=8, motion=True, sfrac=sfrac, verbose=0)
+        mp = MotionParams(model="physio", seed=5)
+        r = scan_widefield(vol_out, opt_out, time_out, scan_params=sp,
+                           spike_params=spike_params, motion_params=mp, seed=1)
+        Nt = time_out.soma.shape[1]
+        assert r.blur_hist is not None and r.blur_hist.shape == (2, Nt)
+        assert np.all(r.blur_hist[:, 0] == 0)   # first frame never blurred
+        # blur_hist == diff(mot_hist)*exposure_frac where |streak| >= min_len
+        step = np.diff(r.mot_hist[:2], axis=1) * mp.exposure_frac
+        mask = np.hypot(step[0], step[1]) >= mp.blur_min_px * sfrac
+        exp = np.zeros_like(r.blur_hist)
+        exp[:, 1:][:, mask] = step[:, mask]
+        np.testing.assert_allclose(r.blur_hist, exp, atol=1e-5)
+        # motion_params round-trips through the result params dict
+        assert r.params["motion_params"] is mp
+
+    def test_randomwalk_has_no_blur_hist(self, synthetic_inputs):
+        """The legacy walk has no intra-frame blur, so blur_hist is None."""
+        from calcia.scanning import scan_widefield
+        from calcia.config.params import MotionParams
+        vol_out, opt_out, time_out, spike_params = synthetic_inputs
+        sp = ScanParams(scan_buff=4, motion=True, sfrac=2, verbose=0)
+        r = scan_widefield(vol_out, opt_out, time_out, scan_params=sp,
+                           spike_params=spike_params,
+                           motion_params=MotionParams(model="randomwalk"), seed=3)
+        assert r.blur_hist is None
+
+    def test_physio_motion_disabled_when_motion_off(self, synthetic_inputs):
+        """motion=False overrides the physio model (no shifts at all)."""
+        from calcia.scanning import scan_widefield
+        from calcia.config.params import MotionParams
+        vol_out, opt_out, time_out, spike_params = synthetic_inputs
+        sp = ScanParams(scan_buff=8, motion=False, sfrac=2, verbose=0)
+        r = scan_widefield(vol_out, opt_out, time_out, scan_params=sp,
+                           spike_params=spike_params,
+                           motion_params=MotionParams(model="physio"), seed=1)
+        assert np.all(r.mot_hist == 0)
+
+
+# ======================================================================
+# Physio motion model + intra-frame blur (unit tests)
+# ======================================================================
+class TestMotionModel:
+    def test_trajectory_shape_and_bound(self):
+        from calcia.config.params import MotionParams
+        from calcia.scanning.motion import generate_motion_trajectory
+        mp = MotionParams(model="physio")
+        rng = np.random.default_rng(0)
+        traj = generate_motion_trajectory(500, mp, vres=1.0, scan_buff=30, rng=rng)
+        assert traj.shape == (500, 2)
+        assert np.all(np.abs(traj) <= 30 + 1e-4)
+
+    def test_trajectory_bound_clips_to_scan_buff(self):
+        """bound_um larger than scan_buff => clipped at scan_buff voxels."""
+        from calcia.config.params import MotionParams
+        from calcia.scanning.motion import generate_motion_trajectory
+        mp = MotionParams(model="physio", bound_um=100.0)
+        rng = np.random.default_rng(1)
+        traj = generate_motion_trajectory(2000, mp, vres=1.0, scan_buff=6, rng=rng)
+        assert np.all(np.abs(traj) <= 6 + 1e-4)
+
+    def test_trajectory_anisotropy_and_autocorr(self):
+        """y-motion (sigma 4.8) exceeds x (2.0); position is autocorrelated."""
+        from calcia.config.params import MotionParams
+        from calcia.scanning.motion import generate_motion_trajectory
+        mp = MotionParams(model="physio")
+        rng = np.random.default_rng(2)
+        t = generate_motion_trajectory(4000, mp, vres=1.0, scan_buff=40, rng=rng)
+        assert t[:, 1].std() > 1.5 * t[:, 0].std()
+        for i in (0, 1):
+            x = t[:, i] - t[:, i].mean()
+            ac1 = (x[:-1] * x[1:]).sum() / (x * x).sum()
+            assert 0.6 < ac1 < 0.95   # correlated slow drift, not white
+
+    def test_trajectory_vres_scales_voxels(self):
+        from calcia.config.params import MotionParams
+        from calcia.scanning.motion import generate_motion_trajectory
+        mp = MotionParams(model="physio")
+        a = generate_motion_trajectory(3000, mp, vres=1.0, scan_buff=100,
+                                       rng=np.random.default_rng(4))
+        b = generate_motion_trajectory(3000, mp, vres=2.0, scan_buff=200,
+                                       rng=np.random.default_rng(4))
+        # same um motion at vres=2 spans ~2x the voxels
+        assert 1.7 < b[:, 1].std() / a[:, 1].std() < 2.3
+
+    def test_streak_kernel_none_for_tiny(self):
+        from calcia.scanning.motion import motion_streak_kernel
+        assert motion_streak_kernel(0.3, 0.0, min_len=0.75) is None
+
+    def test_streak_kernel_normalized_line(self):
+        from calcia.scanning.motion import motion_streak_kernel
+        k = motion_streak_kernel(10.0, 0.0)
+        assert abs(k.sum() - 1.0) < 1e-5
+        # horizontal streak: energy concentrated on the centre row
+        cy = k.shape[0] // 2
+        assert k[cy].sum() > 0.8
+
+    def test_apply_blur_reduces_sharpness(self):
+        from calcia.scanning.motion import apply_motion_blur
+        rng = np.random.default_rng(0)
+        img = np.zeros((40, 40), np.float32)
+        img[20, 20] = 100.0      # a point source
+        blurred = apply_motion_blur(img, 8.0, 0.0)
+        assert blurred.max() < img.max()          # spread out
+        assert abs(blurred.sum() - img.sum()) < 1e-2   # flux conserved
+
+    def test_apply_blur_noop_for_tiny(self):
+        from calcia.scanning.motion import apply_motion_blur
+        img = np.random.default_rng(0).random((20, 20)).astype(np.float32)
+        out = apply_motion_blur(img, 0.2, 0.0)
+        np.testing.assert_array_equal(out, img)

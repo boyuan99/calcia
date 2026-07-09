@@ -48,6 +48,14 @@ class ScanResult:
         ``(H, W, Nt)`` float32 clean out-of-focus (defocus) background image
         (before noise), produced only when ``separate_focus=True``. By linearity
         ``mov_raw == mov_infocus + mov_oof`` (up to float). ``None`` otherwise.
+    blur_hist : np.ndarray, optional
+        ``(2, Nt)`` float32 per-frame intra-frame motion-blur streak ``[dx, dy]``
+        in full-resolution **voxels** (same units as ``mot_hist``). This is the
+        displacement the sample travelled during the exposure that was actually
+        smeared into that frame; ``[0, 0]`` for frames with no applied blur (the
+        first frame, streaks below ``MotionParams.blur_min_px``, or when blur is
+        off). Only produced by the widefield ``physio`` motion model; ``None``
+        for the legacy random walk / two-photon path.
     """
     mov: np.ndarray
     mov_raw: np.ndarray
@@ -55,6 +63,7 @@ class ScanResult:
     params: Dict
     mov_infocus: Optional[np.ndarray] = None
     mov_oof: Optional[np.ndarray] = None
+    blur_hist: Optional[np.ndarray] = None
 
 
 def scan_volume(

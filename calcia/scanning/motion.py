@@ -3,11 +3,126 @@ Motion simulation and per-row image shifting for scanning.
 
 Port of MATLAB: ``imgSubRowShift.m`` and inline motion code in
 ``scan_volume.m``.
+
+Also provides the calcia-original realistic sample-motion model
+(:func:`generate_motion_trajectory`) and intra-frame motion blur
+(:func:`motion_streak_kernel`, :func:`apply_motion_blur`) used by the widefield
+scanner when ``MotionParams.model == 'physio'``. See ``MotionParams`` for the
+physics; the parameters were fit to real NoRMCorre rigid shifts.
 """
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, Optional, Tuple
+
 import numpy as np
+
+if TYPE_CHECKING:
+    from ..config.params import MotionParams
+
+
+def generate_motion_trajectory(
+    nt: int,
+    motion_params: "MotionParams",
+    vres: float,
+    scan_buff: int,
+    rng: np.random.Generator,
+) -> np.ndarray:
+    """Generate a per-frame rigid XY shift trajectory (physio model).
+
+    Returns an ``(nt, 2)`` float array of ``(x, y)`` shifts in **voxels**
+    (full-resolution grid units), matching the sign/units of the legacy
+    integer random-walk trajectory so the scanner can consume either.
+
+    The model is a per-axis AR(1) drift+jitter process plus rare heavy-tailed
+    jumps, clipped to the crop margin::
+
+        s_t = phi * s_{t-1} + sigma * eps_t   (+ jump with prob jump_prob)
+
+    ``sigma`` and the jump/bound magnitudes are given in microns in
+    ``MotionParams`` and converted to voxels here via ``vres``.
+    """
+    phi = float(motion_params.ar_phi)
+    sig_um = np.asarray(motion_params.sigma_um, dtype=np.float64).ravel()
+    if sig_um.size == 1:
+        sig_um = np.array([sig_um[0], sig_um[0]])
+    sigma_vox = sig_um[:2] * vres
+    jump_sigma_vox = float(motion_params.jump_sigma_um) * vres
+
+    # Clip bound: min(requested um bound, crop margin scan_buff voxels).
+    if motion_params.bound_um is not None:
+        bound_vox = min(float(motion_params.bound_um) * vres, float(scan_buff))
+    else:
+        bound_vox = float(scan_buff)
+
+    traj = np.zeros((nt, 2), dtype=np.float64)
+    s = np.zeros(2, dtype=np.float64)
+    for t in range(nt):
+        s = phi * s + sigma_vox * rng.standard_normal(2)
+        if motion_params.jump_prob > 0 and rng.random() < motion_params.jump_prob:
+            s = s + jump_sigma_vox * rng.standard_normal(2)
+        s = np.clip(s, -bound_vox, bound_vox)
+        traj[t] = s
+    return traj.astype(np.float32)
+
+
+def motion_streak_kernel(
+    dx: float,
+    dy: float,
+    max_len: float = 40.0,
+    min_len: float = 0.75,
+) -> Optional[np.ndarray]:
+    """Normalized line (streak) kernel for intra-frame motion blur.
+
+    ``dx, dy`` is the intra-frame displacement (pixels) the sample travels
+    during the exposure. Returns a small 2-D kernel (sum 1) that, when
+    convolved with a sharp frame, smears it along that direction, or ``None``
+    when the streak is below ``min_len`` (negligible).
+    """
+    L = float(np.hypot(dx, dy))
+    if L < min_len:
+        return None
+    L = min(L, float(max_len))
+    ux, uy = dx / np.hypot(dx, dy), dy / np.hypot(dx, dy)
+
+    n = max(2, int(np.ceil(L)) + 1)
+    ts = np.linspace(-0.5, 0.5, n) * L            # positions along the streak
+    xs, ys = ts * ux, ts * uy                     # (col, row) offsets, px
+
+    R = int(np.ceil(L / 2.0)) + 1
+    size = 2 * R + 1
+    ker = np.zeros((size, size), dtype=np.float64)
+    # bilinear splat each sample point into the kernel centred at (R, R)
+    for x, y in zip(xs, ys):
+        cx, cy = R + x, R + y
+        x0, y0 = int(np.floor(cx)), int(np.floor(cy))
+        fx, fy = cx - x0, cy - y0
+        for (yy, wy) in ((y0, 1 - fy), (y0 + 1, fy)):
+            for (xx, wx) in ((x0, 1 - fx), (x0 + 1, fx)):
+                if 0 <= yy < size and 0 <= xx < size:
+                    ker[yy, xx] += wy * wx
+    tot = ker.sum()
+    if tot <= 0:
+        return None
+    return (ker / tot).astype(np.float32)
+
+
+def apply_motion_blur(
+    img: np.ndarray,
+    dx: float,
+    dy: float,
+    max_len: float = 40.0,
+    min_len: float = 0.75,
+) -> np.ndarray:
+    """Convolve ``img`` with the intra-frame motion streak for (dx, dy) px.
+
+    No-op (returns ``img`` unchanged) when the streak is negligible.
+    """
+    ker = motion_streak_kernel(dx, dy, max_len=max_len, min_len=min_len)
+    if ker is None:
+        return img
+    from scipy.ndimage import convolve
+    return convolve(img.astype(np.float32), ker, mode="nearest").astype(np.float32)
 
 
 def apply_row_shifts(

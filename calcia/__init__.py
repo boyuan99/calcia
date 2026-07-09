@@ -23,4 +23,4 @@ from .traces import TimeTracesResult, generate_time_traces
 from .scanning import ScanResult, scan_volume, scan_widefield
 
 # Widefield (single-photon) parameter classes
-from .config.params import CameraNoiseParams, WidefieldParams
+from .config.params import CameraNoiseParams, MotionParams, WidefieldParams

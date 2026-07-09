@@ -617,6 +617,80 @@ class ScanParams:
 
 
 @dataclass
+class MotionParams:
+    """
+    Sample-motion model for the scanning stage.
+
+    The legacy model (``model='randomwalk'``) is a bounded integer random walk:
+    each frame the rigid XY shift changes by -1/0/+1 voxel and is clipped to
+    ``ScanParams.scan_buff``. Measured against real motion-corrected striatum
+    recordings (NoRMCorre rigid shifts) it is far too small in amplitude, too
+    smooth (no fast jitter), isotropic, and has no intra-frame blur.
+
+    The ``model='physio'`` model reproduces the real statistics:
+
+    * **AR(1) drift + jitter** per axis: ``s_t = phi*s_{t-1} + sigma*eps``.
+      ``phi`` sets the position autocorrelation (~0.82 measured) and ``sigma``
+      (physical, um) the per-frame jitter. Together they match BOTH the position
+      std and the frame-to-frame step std. Anisotropic via the 2-tuple ``sigma``
+      (real y-motion is ~2.3x x-motion).
+    * **Heavy-tailed jumps**: with probability ``jump_prob`` a frame gets an
+      extra large displacement ~ ``N(0, jump_sigma)`` (breathing / startle),
+      reproducing the rare ~40 um excursions real data shows.
+    * **Intra-frame motion blur**: within a single exposure the sample moves, so
+      a frame with large velocity is smeared along the motion direction. The blur
+      length is the intra-frame displacement ``|delta_shift| * exposure_frac``;
+      a normalized line (streak) kernel of that length/direction convolves the
+      clean frame before camera noise. This is the mechanism by which sudden
+      animal motion produces individual very-blurry frames.
+
+    All physical lengths are in **microns**; the scanner converts to voxels via
+    ``VolumeParams.vres`` and to movie pixels via ``ScanParams.sfrac``.
+
+    Attributes
+    ----------
+    model : str
+        'randomwalk' (legacy, default) or 'physio' (realistic).
+    ar_phi : float
+        AR(1) coefficient (position lag-1 autocorrelation). ~0.82 = real.
+    sigma_um : (float, float)
+        Per-axis (x, y) AR innovation std in um. (2.0, 4.8) reproduces the
+        measured per-axis position std (3.5, 8.3 um) and step std (2.0, 5.1).
+    bound_um : float or None
+        Clip |shift| to this many um (both axes). None -> use the scan_buff
+        crop margin (scan_buff / vres um). Real range is ~+/-26 um, so a large
+        FOV should set scan_buff high enough to allow it.
+    jump_prob : float
+        Per-frame probability of a sudden large jump.
+    jump_sigma_um : float
+        Std (um) of the sudden-jump displacement.
+    blur : bool
+        Enable intra-frame motion blur (streak) on fast frames.
+    exposure_frac : float
+        Exposure duty cycle t_exp/dt in [0, 1]. 1.0 = continuous (full-frame
+        integration); lower = shorter exposure = less intra-frame smear.
+    blur_min_px : float
+        Skip the blur convolution when the streak is shorter than this many
+        movie pixels (negligible + saves compute).
+    blur_max_px : float
+        Safety cap on streak kernel length in movie pixels.
+    seed : int or None
+        Dedicated RNG seed for the trajectory (falls back to the scan seed).
+    """
+    model: str = "randomwalk"
+    ar_phi: float = 0.82
+    sigma_um: Tuple[float, float] = (2.0, 4.8)
+    bound_um: Optional[float] = 26.0
+    jump_prob: float = 0.01
+    jump_sigma_um: float = 12.0
+    blur: bool = True
+    exposure_frac: float = 1.0
+    blur_min_px: float = 0.75
+    blur_max_px: float = 40.0
+    seed: Optional[int] = None
+
+
+@dataclass
 class NoiseParams:
     """
     PMT / electronics noise model parameters.

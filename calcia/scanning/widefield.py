@@ -25,9 +25,10 @@ from typing import TYPE_CHECKING, Dict, Optional
 import numpy as np
 from scipy.signal import convolve2d
 
-from ..config.params import CameraNoiseParams, ScanParams, WidefieldParams
+from ..config.params import CameraNoiseParams, MotionParams, ScanParams, WidefieldParams
 from ..optics.signal import widefield_signal_scale
 from .convolution import psf_fft, single_scan
+from .motion import apply_motion_blur, generate_motion_trajectory
 from .noise import camera_noise
 from .scanning import ScanResult, _idx_to_2d
 
@@ -46,6 +47,7 @@ def scan_widefield(
     cam_params: Optional[CameraNoiseParams] = None,
     wf_params: Optional[WidefieldParams] = None,
     spike_params: Optional["SpikeParams"] = None,
+    motion_params: Optional[MotionParams] = None,
     *,
     seed: Optional[int] = None,
     separate_focus: bool = False,
@@ -318,7 +320,26 @@ def scan_widefield(
 
     # ------------------------------------------------------------------
     # Motion setup: per-frame rigid XY shift
+    #   * legacy 'randomwalk' (default): bounded +/-1 voxel integer walk.
+    #   * 'physio': AR(1) drift+jitter + heavy-tailed jumps + intra-frame
+    #     motion blur, fit to real NoRMCorre shifts (see MotionParams).
     # ------------------------------------------------------------------
+    use_physio = (motion_params is not None
+                  and motion_params.model == "physio" and mot_opt)
+    physio_traj = None
+    if use_physio:
+        _vp = opt_out.params.get("vol_params") if opt_out.params else None
+        vres = float(getattr(_vp, "vres", 1.0) or 1.0)
+        mrng = (np.random.default_rng(motion_params.seed)
+                if motion_params.seed is not None else rng)
+        physio_traj = generate_motion_trajectory(
+            Nt, motion_params, vres, scan_buff, mrng)
+        if verbose >= 1:
+            _pk = np.abs(physio_traj).max(0)
+            print(f"    - Motion: physio model, |shift| max "
+                  f"[{_pk[0]:.1f}, {_pk[1]:.1f}] vox, "
+                  f"blur={'on' if motion_params.blur else 'off'}")
+
     if mot_opt:
         xy_step = np.array([-1, 0, 0, 0, 0, 0, 1])
     else:
@@ -335,6 +356,10 @@ def scan_widefield(
     mov = np.zeros((out_h, out_w, Nt), dtype=np.float32)
     mov_raw = np.zeros((out_h, out_w, Nt), dtype=np.float32)
     mot_hist = np.zeros((3, Nt), dtype=np.float32)
+    # Per-frame intra-frame blur streak [dx, dy] in full-res voxels (physio
+    # only). Records the displacement actually smeared into each frame; 0 for
+    # frames where no blur was applied. Ground truth for de-blur / registration.
+    blur_hist = (np.zeros((2, Nt), dtype=np.float32) if use_physio else None)
     mov_infocus = (np.zeros((out_h, out_w, Nt), dtype=np.float32)
                    if separate_focus else None)
     mov_oof = (np.zeros((out_h, out_w, Nt), dtype=np.float32)
@@ -369,12 +394,23 @@ def scan_widefield(
     n_nuc = len(nuc_idx_list) if nuc_label else 0
 
     for kk in range(Nt):
-        # --- Per-frame rigid XY shift (Brownian walk clipped to buffer) ---
-        x_shift = int(np.clip(x_shift + rng.choice(xy_step),
-                              -scan_buff, scan_buff))
-        y_shift = int(np.clip(y_shift + rng.choice(xy_step),
-                              -scan_buff, scan_buff))
-        mot_hist[:, kk] = [x_shift, y_shift, 0]
+        # --- Per-frame rigid XY shift + intra-frame blur velocity ---
+        blur_dx = blur_dy = 0.0
+        if use_physio:
+            xf, yf = float(physio_traj[kk, 0]), float(physio_traj[kk, 1])
+            if kk > 0:
+                blur_dx = (xf - float(physio_traj[kk - 1, 0]))
+                blur_dy = (yf - float(physio_traj[kk - 1, 1]))
+            x_shift = int(round(xf))
+            y_shift = int(round(yf))
+            mot_hist[:, kk] = [xf, yf, 0]
+        else:
+            # legacy bounded +/-1 voxel Brownian walk
+            x_shift = int(np.clip(x_shift + rng.choice(xy_step),
+                                  -scan_buff, scan_buff))
+            y_shift = int(np.clip(y_shift + rng.choice(xy_step),
+                                  -scan_buff, scan_buff))
+            mot_hist[:, kk] = [x_shift, y_shift, 0]
 
         # --- Build transient activity volume ---
         tmp_vol = np.zeros((N1, N2, N3), dtype=np.float32)
@@ -422,6 +458,27 @@ def scan_widefield(
             infocus_img = sigscale * single_scan(vol_in, PSF.shape, freq_psf, 1)
             oof_img = clean_img - infocus_img
 
+        # --- Intra-frame motion blur (physio model): the sample moves DURING
+        # the exposure, so a fast frame is smeared along the motion direction.
+        # Applied to the full-res clean image (before downsample); the streak
+        # length is the intra-frame displacement in voxels. Convolution is
+        # linear so the in-focus/out-of-focus split stays consistent. ---
+        if use_physio and motion_params.blur and (blur_dx or blur_dy):
+            bx = blur_dx * motion_params.exposure_frac
+            by = blur_dy * motion_params.exposure_frac
+            _mx = motion_params.blur_max_px * sfrac
+            _mn = motion_params.blur_min_px * sfrac
+            # Record the streak actually rendered into this frame (0 stays if
+            # below _mn, where apply_motion_blur is a no-op) as ground truth.
+            if np.hypot(bx, by) >= _mn:
+                blur_hist[:, kk] = [bx, by]
+            clean_img = apply_motion_blur(clean_img, bx, by,
+                                          max_len=_mx, min_len=_mn)
+            if separate_focus:
+                infocus_img = apply_motion_blur(infocus_img, bx, by,
+                                                max_len=_mx, min_len=_mn)
+                oof_img = clean_img - infocus_img
+
         # --- Rigid XY shift/crop + downsample ---
         clean_img = _post(clean_img, x_shift, y_shift)
         if separate_focus:
@@ -451,9 +508,11 @@ def scan_widefield(
         "scan_params": scan_params,
         "cam_params": cam_params,
         "wf_params": wf_params,
+        "motion_params": motion_params,
     }
     return ScanResult(mov=mov, mov_raw=mov_raw, mot_hist=mot_hist, params=params,
-                      mov_infocus=mov_infocus, mov_oof=mov_oof)
+                      mov_infocus=mov_infocus, mov_oof=mov_oof,
+                      blur_hist=blur_hist)
 
 
 def _rigid_shift_and_crop(
