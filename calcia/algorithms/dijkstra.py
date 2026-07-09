@@ -539,6 +539,65 @@ try:
     from numba import njit
 
     @njit(cache=True)
+    def _heap_push(hd, hi, size, d, idx):
+        """Push (d, idx) onto the binary min-heap in hd/hi; return the new size.
+
+        Replaces the previous O(size) append + linear-scan-for-min scheme with a
+        proper sift-up so both push and pop are O(log size). Semantics are
+        otherwise identical (lazy deletion: duplicates may be pushed and are
+        filtered on pop via the ``visited`` array).
+        """
+        i = size
+        hd[i] = d
+        hi[i] = idx
+        while i > 0:
+            parent = (i - 1) >> 1
+            if hd[parent] <= hd[i]:
+                break
+            td = hd[i]
+            hd[i] = hd[parent]
+            hd[parent] = td
+            ti = hi[i]
+            hi[i] = hi[parent]
+            hi[parent] = ti
+            i = parent
+        return size + 1
+
+    @njit(cache=True)
+    def _heap_pop(hd, hi, size):
+        """Pop the minimum (dist, idx) via sift-down; return (d, idx, new_size).
+
+        Caller must ensure ``size > 0``. On ties (equal dist) the element
+        returned is the heap root, which may differ from the old linear scan's
+        first-index choice; the finalized distances are unaffected (see module
+        note on tie-breaking).
+        """
+        top_d = hd[0]
+        top_i = hi[0]
+        size -= 1
+        hd[0] = hd[size]
+        hi[0] = hi[size]
+        i = 0
+        while True:
+            left = 2 * i + 1
+            right = left + 1
+            smallest = i
+            if left < size and hd[left] < hd[smallest]:
+                smallest = left
+            if right < size and hd[right] < hd[smallest]:
+                smallest = right
+            if smallest == i:
+                break
+            td = hd[i]
+            hd[i] = hd[smallest]
+            hd[smallest] = td
+            ti = hi[i]
+            hi[i] = hi[smallest]
+            hi[smallest] = ti
+            i = smallest
+        return top_d, top_i, size
+
+    @njit(cache=True)
     def _dijkstra_core_numba(cost_flat, neighbor_offsets, root_idx, dims):
         """Numba-compiled core Dijkstra algorithm."""
         n_voxels = len(cost_flat)
@@ -641,17 +700,8 @@ try:
         heap_idx[0] = root_idx
 
         while heap_size > 0:
-            # Pop minimum
-            min_i = 0
-            for i in range(1, heap_size):
-                if heap_dist[i] < heap_dist[min_i]:
-                    min_i = i
-
-            dist_u = heap_dist[min_i]
-            u = heap_idx[min_i]
-            heap_size -= 1
-            heap_dist[min_i] = heap_dist[heap_size]
-            heap_idx[min_i] = heap_idx[heap_size]
+            # Pop minimum (binary min-heap)
+            dist_u, u, heap_size = _heap_pop(heap_dist, heap_idx, heap_size)
 
             if visited[u]:
                 continue
@@ -678,9 +728,8 @@ try:
                 if ndist < distance[nn]:
                     distance[nn] = ndist
                     path_from[nn] = u
-                    heap_dist[heap_size] = ndist
-                    heap_idx[heap_size] = nn
-                    heap_size += 1
+                    heap_size = _heap_push(heap_dist, heap_idx,
+                                           heap_size, ndist, nn)
 
         return distance, path_from
 
@@ -718,16 +767,8 @@ try:
         heap_idx[0] = root_idx
 
         while heap_size > 0:
-            min_i = 0
-            for i in range(1, heap_size):
-                if heap_dist[i] < heap_dist[min_i]:
-                    min_i = i
-
-            dist_u = heap_dist[min_i]
-            u = heap_idx[min_i]
-            heap_size -= 1
-            heap_dist[min_i] = heap_dist[heap_size]
-            heap_idx[min_i] = heap_idx[heap_size]
+            # Pop minimum (binary min-heap)
+            dist_u, u, heap_size = _heap_pop(heap_dist, heap_idx, heap_size)
 
             if visited[u]:
                 continue
@@ -758,9 +799,8 @@ try:
                         count += 1
                     distance[nn] = ndist
                     path_from[nn] = u
-                    heap_dist[heap_size] = ndist
-                    heap_idx[heap_size] = nn
-                    heap_size += 1
+                    heap_size = _heap_push(heap_dist, heap_idx,
+                                           heap_size, ndist, nn)
 
         return count
 
