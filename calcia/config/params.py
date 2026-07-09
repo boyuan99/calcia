@@ -771,11 +771,14 @@ _STRIATUM_NEURON = {
 }
 _STRIATUM_VASC = {
     "depth_surf": 0.0,
-    # Thinner, sparser vessels: in 1P widefield the strong out-of-focus haze
-    # fills THIN vessel voids so real striatum vessels are nearly invisible
-    # (measured: real mean-image has ~0 strong dark structures, sim had median
-    # ~15 um up to 65 um dark voids). radius 9->4 um (diameter ~8 um) + sparser
-    # so the haze fills them and they fade like the real samples.
+    # Thin, sparse vessels. NOTE: a de-thinned variant (vesSize (10,6,2),
+    # vesFreq (200,250,60), distsc 4) renders the dark vessels the real tdTomato
+    # data shows, and is verified to work at small FOV — but it makes Phase-1
+    # generation IMPRACTICAL at the 1.7 mm window FOV (denser vessel Dijkstra ran
+    # >6.5 h without finishing). Kept thin here for tractable generation; the
+    # de-thinned values live in config/region_presets_backup/striatum_vasc_original.md
+    # for small-FOV vessel'd runs. Speeding up the vessel pathfinding is the
+    # prerequisite for full-FOV realistic vessels.
     "vesSize": (2.0, 2.0, 1.0),
     "vesFreq": (600.0, 600.0, 150.0),
     "distsc": 6.0,
