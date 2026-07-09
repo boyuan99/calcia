@@ -431,8 +431,6 @@ def _smooth_cell_body(allpaths, cell_body, fdims):
     Returns:
         smoothed: 1D array of linear indices for smoothed cell body region.
     """
-    from scipy.interpolate import CubicSpline
-
     fdims = tuple(int(d) for d in fdims)
     n_paths = len(allpaths)
 
@@ -563,39 +561,53 @@ def _smooth_cell_body(allpaths, cell_body, fdims):
             (border_dist < dist_off) & (border_dist > test_dist[0])
         )[0]
 
-        test_sub_list = []
-        for bi in test_idx:
-            # 3 control points: connRoots -> connIdx -> border voxel
-            pts = np.array([
-                conn_roots[j_g],
-                conn_idx[j_g],
-                borders_sub[bi],
-            ])
-
-            # Chord-length parameterization
-            seg_lens = np.sqrt(np.sum(np.diff(pts, axis=0)**2, axis=1))
-            t_knots = np.concatenate([[0], np.cumsum(seg_lens)])
-
-            if t_knots[-1] < 1e-10:
-                continue
-
-            try:
-                t_eval = np.linspace(t_knots[0], t_knots[-1], numsamp)
-                dpts = np.zeros((numsamp, 3))
-                for dim in range(3):
-                    cs = CubicSpline(
-                        t_knots, pts[:, dim], bc_type='not-a-knot'
-                    )
-                    dpts[:, dim] = cs(t_eval)
-                dpts = np.round(dpts).astype(int)
-                test_sub_list.append(dpts)
-            except Exception:
-                continue
-
-        if len(test_sub_list) == 0:
+        # Vectorized parabola smoothing (replaces the per-border-voxel scipy
+        # CubicSpline, which dominated this stage). For 3 control points the
+        # not-a-knot cubic *is* the parabola through them, so every border arc in
+        # this group is built in one numpy batch instead of hundreds of scipy
+        # spline fits. Verified voxel-identical after rounding. The output feeds
+        # a boolean mask (an unordered set of voxels), so batch order is
+        # irrelevant.
+        #   control points per border b: P0 -> P1 -> P2_b
+        #   knots (chord length): [0, t1, t2_b],  t1 shared, t2_b per border
+        #   parabola per dim: y(t) = P0 + b*t + c*t^2, solved from the 2x2 system
+        P0 = conn_roots[j_g]                      # (3,) shared origin
+        P1 = conn_idx[j_g]                        # (3,) shared mid point
+        r1 = P1 - P0
+        t1 = float(np.sqrt(np.sum(r1 * r1)))
+        if t1 < 1e-10 or len(test_idx) == 0:
+            # degenerate group: every knot vector [0, 0, t2] is non-increasing,
+            # so the old scipy path raised + skipped all -> group contributes
+            # nothing.
             continue
 
-        test_sub = np.vstack(test_sub_list)
+        P2 = borders_sub[test_idx]                # (B, 3)
+        t2seg = np.sqrt(np.sum((P2 - P1) ** 2, axis=1))   # (B,)
+        # Strictly-increasing knots only (t2seg > 0); the old code skipped the
+        # rest via scipy's ValueError -> except/continue.
+        keep = t2seg > 0.0
+        if not np.any(keep):
+            continue
+        P2 = P2[keep]
+        t2 = t1 + t2seg[keep]                     # (B',)
+        r2 = P2 - P0                              # (B', 3)
+
+        # Solve [[t1, t1^2], [t2, t2^2]] @ [b; c] = [r1; r2] analytically.
+        det = t1 * t2 * (t2 - t1)                 # (B',) > 0 given t1>0, t2>t1
+        b = (t2[:, None] ** 2 * r1[None, :] - (t1 * t1) * r2) / det[:, None]
+        c = (-t2[:, None] * r1[None, :] + t1 * r2) / det[:, None]
+
+        # t_eval per border reproduces np.linspace(0, t2, numsamp) bit-for-bit
+        # (k*delta then exact endpoint) so rounding matches the old path.
+        kk = np.arange(numsamp)
+        delta = t2 / (numsamp - 1)                # (B',)
+        teval = kk[None, :] * delta[:, None]      # (B', numsamp)
+        teval[:, -1] = t2
+
+        samp = (P0[None, None, :]
+                + teval[:, :, None] * b[:, None, :]
+                + (teval ** 2)[:, :, None] * c[:, None, :])   # (B', numsamp, 3)
+        test_sub = np.round(samp).reshape(-1, 3).astype(int)
         # Clip to valid range [0, fdims-1]
         test_sub = np.clip(test_sub, 0, np.array(fdims) - 1)
         test_ind = np.ravel_multi_index(
