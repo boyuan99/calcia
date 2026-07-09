@@ -29,6 +29,84 @@ _L_BUFF: int = 500       # steady-state buffer (samples at 100 Hz)
 _SPIKE_DT: float = 1.0 / 100.0  # internal simulation rate
 
 
+def _static_time_traces(
+    spike_params: SpikeParams,
+    cal_params: CalciumParams,
+    mod_vals: Optional[np.ndarray],
+    n_desired: int,
+    v: int,
+) -> "TimeTracesResult":
+    """Constant (time-invariant) fluorescence traces for STATIC indicators.
+
+    Constitutive structural labels — tdTomato, BFP, GFP-as-marker — are not
+    calcium sensitive: their brightness is fixed by expression level, not by
+    neural activity. This path returns a flat ``K x nt`` trace per compartment
+    (a constant ``1.0`` per cell, then modulated by per-cell expression
+    variation ``mod_vals``) and skips spike generation and the calcium ODE
+    entirely.
+
+    Because every trace is constant in time, the downstream scanner puts all
+    the brightness into its static baseline volume (``f0vol``) and its transient
+    activity volume is identically zero. The resulting movie is therefore a
+    single structural image repeated every frame; the only frame-to-frame
+    variation is camera shot/read noise plus sample motion — exactly the
+    behaviour of a real static-indicator recording (whose measured temporal CV
+    is pure detector noise, ~0.08-0.13, not calcium transients).
+
+    Per-cell expression heterogeneity (some cells brighter, ``p_off`` fraction
+    dark) still comes from ``mod_vals``; the spatial structure (soma vs nucleus
+    vs neuropil) comes from the Phase-1 footprints and the scanner's
+    ``nuc_label`` switch, not from here.
+    """
+    K = spike_params.K
+    nt = n_desired
+    baseline = np.float32(1.0)
+
+    soma = np.full((K, nt), baseline, dtype=np.float32)
+    dend = (np.full((K, nt), baseline, dtype=np.float32)
+            if spike_params.dendflag else None)
+
+    if spike_params.N_bg > 0:
+        bg = np.full((spike_params.N_bg, nt), baseline, dtype=np.float32)
+    elif spike_params.axonflag:
+        bg = np.full((K, nt), baseline, dtype=np.float32)
+    else:
+        bg = None
+
+    if mod_vals is None:
+        mod_vals = expression_variation(
+            K, spike_params.p_off, spike_params.min_mod
+        )
+    mod_vals = np.asarray(mod_vals, dtype=np.float32).ravel()[:K]
+
+    soma = soma * mod_vals[:, np.newaxis]
+    if dend is not None:
+        dend = dend * mod_vals[:, np.newaxis]
+    # Axon/background traces share the soma neurons only when they are the
+    # per-neuron axon path (bg.shape[0] == K); GP neuropil (N_bg rows) is
+    # independent and keeps a flat baseline.
+    if bg is not None and spike_params.axonflag and bg.shape[0] == K:
+        bg = bg * mod_vals[:, np.newaxis]
+    if bg is not None and spike_params.bg_scale != 1.0:
+        bg = bg * np.float32(spike_params.bg_scale)
+
+    spikes_out = (np.zeros((K, nt), dtype=np.float32)
+                  if spike_params.spikeflag else None)
+
+    if v >= 1:
+        print("  [static] constant fluorescence "
+              f"(prot={spike_params.prot!r}); no spikes / calcium ODE")
+
+    return TimeTracesResult(
+        soma=soma,
+        dend=dend,
+        bg=bg,
+        spikes=spikes_out,
+        mod_vals=mod_vals,
+        params={"spike_params": spike_params, "cal_params": cal_params},
+    )
+
+
 def _warmup_buffer(spk: np.ndarray, n: int) -> np.ndarray:
     """Build an ``n``-sample calcium warm-up prefix with the SAME spike
     statistics as ``spk`` (tiled/wrapped), so the ODE calcium filter reaches
@@ -242,7 +320,8 @@ def _simulate_compartment(
 
     raise ValueError(
         f"Unknown dyn_type={dyn_type!r}. "
-        "Options: 'AR1', 'AR2', 'single', 'Ca_DE', 'double'."
+        "Options: 'AR1', 'AR2', 'single', 'Ca_DE', 'double', 'static'. "
+        "('static' is handled earlier in generate_time_traces, not here.)"
     )
 
 
@@ -328,6 +407,16 @@ def generate_time_traces(
         print("=" * 60)
         print("generate_time_traces  (Phase 3: time traces)")
         print("=" * 60)
+
+    # ------------------------------------------------------------------
+    # Static (non-Ca-dependent) fluorophores: tdTomato, BFP, GFP marker.
+    # Constitutive labels have no calcium dynamics, so short-circuit the
+    # whole spike + calcium ODE pipeline and return flat traces. See
+    # _static_time_traces for the rationale.
+    # ------------------------------------------------------------------
+    if dyn_type == "static":
+        return _static_time_traces(spike_params, cal_params, mod_vals,
+                                   n_desired, v)
 
     # ------------------------------------------------------------------
     # Step 1: Generate spike trains

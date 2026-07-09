@@ -475,7 +475,12 @@ class SpikeParams:
         mu: Mean of the log-normal r.v. for AR spike amplitudes.
         sig: Std-dev of the log-normal r.v. for AR spike amplitudes.
         dyn_type: Calcium dynamics model.  Options: 'AR1', 'AR2', 'single',
-            'Ca_DE', 'double'.
+            'Ca_DE', 'double', 'static'.  Use 'static' for constitutive /
+            non-calcium-sensitive structural labels (tdTomato, BFP, GFP
+            marker): the trace is constant in time (no spikes, no calcium
+            ODE) so the movie is a fixed structural image plus camera noise
+            and motion.  Combine with ScanParams.nuc_label=1 for a nuclear
+            label (BFP) or leave it 0 for a cytoplasmic label (tdTomato).
         rate_dist: Distribution for per-neuron firing rates.  Options:
             'gamma', 'uniform'.
         N_bg: Number of background/neuropil GP components (0 = none).

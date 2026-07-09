@@ -619,6 +619,66 @@ class TestGenerateTimeTraces:
         assert result.bg is not None
         assert result.bg.shape[0] == 3
 
+    # ------------------------------------------------------------------
+    # Static (non-Ca-dependent) indicator mode: tdTomato / BFP
+    # ------------------------------------------------------------------
+    def test_static_shape(self):
+        np.random.seed(42)
+        p = SpikeParams(K=5, nt=40, dt=1 / 20, dyn_type="static",
+                        prot="tdTomato", dendflag=True, axonflag=True,
+                        N_bg=0, verbose=0)
+        result = generate_time_traces(p)
+        assert result.soma.shape == (5, 40)
+        assert result.dend.shape == (5, 40)
+        assert result.bg.shape == (5, 40)
+
+    def test_static_is_constant_in_time(self):
+        """A static indicator has zero activity variation: every trace is flat."""
+        np.random.seed(0)
+        p = SpikeParams(K=8, nt=50, dt=1 / 20, dyn_type="static",
+                        prot="BFP", dendflag=True, axonflag=True,
+                        N_bg=0, verbose=0)
+        result = generate_time_traces(p)
+        for arr in (result.soma, result.dend, result.bg):
+            # max per-row temporal std is float round-off, not real variation
+            assert float(np.abs(arr - arr[:, :1]).max()) < 1e-4
+
+    def test_static_no_spikes(self):
+        np.random.seed(0)
+        p = SpikeParams(K=4, nt=30, dt=1 / 20, dyn_type="static",
+                        prot="tdTomato", dendflag=False, axonflag=False,
+                        spikeflag=True, N_bg=0, verbose=0)
+        result = generate_time_traces(p)
+        assert result.spikes is not None
+        assert float(result.spikes.sum()) == 0.0
+        assert result.dend is None
+        assert result.bg is None
+
+    def test_static_expression_heterogeneity(self):
+        """Per-cell brightness comes from mod_vals; constant across time."""
+        np.random.seed(1)
+        p = SpikeParams(K=30, nt=20, dt=1 / 20, dyn_type="static",
+                        prot="tdTomato", dendflag=False, axonflag=False,
+                        p_off=0.2, N_bg=0, verbose=0)
+        result = generate_time_traces(p)
+        col0 = result.soma[:, 0]
+        # heterogeneous cells + some switched fully off by p_off
+        assert col0.std() > 0
+        assert int((col0 == 0).sum()) >= 1
+        # each cell's value equals its mod_val (constant baseline 1.0)
+        assert np.allclose(col0, result.mod_vals, atol=1e-5)
+
+    def test_static_no_low_activity_warning(self):
+        """The static path must not emit the low-activity spike warning."""
+        import warnings
+        np.random.seed(2)
+        p = SpikeParams(K=6, nt=40, dt=1 / 20, dyn_type="static",
+                        prot="BFP", dendflag=False, axonflag=False,
+                        N_bg=0, verbose=0)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            generate_time_traces(p)
+
     def test_predef_s_times(self):
         np.random.seed(42)
         # Pass a pre-built spike matrix at 100 Hz
