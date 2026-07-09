@@ -111,6 +111,11 @@ def parse_args():
                         "cells (sparse Cre+virus labelling, ~3%% of anatomical "
                         "density); leave None on smoke/medium to use the full "
                         "anatomical density (neur_density-driven).")
+    p.add_argument("--neur-density", type=float, default=None, dest="neur_density",
+                   help="Neuron density in neurons/mm^3 (density-driven path; "
+                        "only used when --n-neur is not set). Default preset is "
+                        "the full anatomical 1e5. Pass e.g. 70000 for a "
+                        "70%%-density volume; the run dir is tagged lowdens<pct>.")
     p.add_argument("--soma-gain", type=float, default=None, dest="soma_gain",
                    help="Multiply soma-voxel fluorescence by this factor after "
                         "Phase 1 (values-only rescale of gp_vals via soma_mask; "
@@ -128,13 +133,44 @@ def parse_args():
                         "window vignetting) that NAOMi's uniform model lacks — "
                         "it is the single biggest visual difference from the "
                         "real striatum samples.")
+    p.add_argument("--motion-model", type=str, default="randomwalk",
+                   dest="motion_model", choices=["randomwalk", "physio"],
+                   help="Sample-motion model for Phase 4. 'randomwalk' (legacy "
+                        "default) = bounded +/-1 voxel integer walk. 'physio' = "
+                        "realistic AR(1) drift+jitter + heavy-tailed jumps + "
+                        "intra-frame motion blur, fit to real NoRMCorre striatum "
+                        "shifts (see data/real/398_09192025_gcamp_mc_shifts.mat). "
+                        "physio auto-bumps scan_buff to 30 (real range ~+/-26 um).")
     p.add_argument("--prot", type=str, default="GCaMP6f")
+    p.add_argument("--simtrace-design", type=str, default=None,
+                   dest="simtrace_design",
+                   choices=["hawkes_smallworld", "hawkes_scale_free",
+                            "hmm_gated_hawkes", "shared_drive_osc",
+                            "hmm_gated_drive"],
+                   help="Drive Phase 3 spikes from a sim-trace coupling design "
+                        "(via calcia.traces.simtrace_bridge) instead of the "
+                        "built-in burst/hawkes. Reuses the cached Phase 1 "
+                        "volume unchanged. The hawkes_* / *_hawkes designs build "
+                        "a dense K x K matrix (only feasible for K up to a few "
+                        "thousand); on a full-size dense volume (K ~ 50k) use a "
+                        "scalable design: 'shared_drive_osc' (B: shared rhythm) "
+                        "or 'hmm_gated_drive' (E over B: brain-state-gated "
+                        "rhythm), neither of which builds a K x K matrix.")
+    p.add_argument("--simtrace-rate", type=float, default=0.08,
+                   dest="simtrace_rate",
+                   help="Baseline rate scale for the sim-trace design "
+                        "(Gamma scale for per-neuron mu; ~0.08 -> a few Hz). "
+                        "Only used with --simtrace-design.")
+    p.add_argument("--no-viz-prep", action="store_true",
+                   help="skip pre-building the visualization bundle "
+                        "(vessel/soma meshes + 2D outlines) at the end")
     return p.parse_args()
 
 
-def phase1_signature(vol_sz, vol_depth, vres, seed, region, n_neur):
+def phase1_signature(vol_sz, vol_depth, vres, seed, region, n_neur, neur_density=None):
     h = hashlib.sha1()
-    h.update(repr((tuple(vol_sz), vol_depth, vres, seed, region, n_neur)).encode())
+    h.update(repr((tuple(vol_sz), vol_depth, vres, seed, region,
+                   n_neur, neur_density)).encode())
     return h.hexdigest()[:10]
 
 
@@ -193,15 +229,29 @@ def main():
     cfg.smod = args.smod
     cfg.burst_mean = args.burst_mean
     cfg.bg_scale = args.bg_scale
+    cfg.motion_model = args.motion_model
     cfg.prot = args.prot
     if args.vres is not None:
         cfg.vres = args.vres
     if args.n_neur is not None:
         cfg.n_neur = args.n_neur
+    if args.neur_density is not None:
+        cfg.neur_density = args.neur_density
     if args.soma_gain is not None:
         cfg.soma_gain = args.soma_gain
     if args.no_illum:
         cfg.illum.enable = False
+
+    # Make the run self-identifying when driven by a sim-trace design, so its
+    # output dir is not confused with a native-trace run of the same volume.
+    if args.simtrace_design is not None:
+        tag = f"{tag}_simtrace_{args.simtrace_design}"
+
+    # Self-identify density-driven runs whose density differs from the full
+    # anatomical 1e5/mm^3, so a low-density volume's output dir is never
+    # confused with the full-density main line.
+    if cfg.n_neur is None and cfg.neur_density != 1e5:
+        tag = f"{tag}_lowdens{round(cfg.neur_density / 1e5 * 100)}pct"
 
     # Derived locals (the pipeline body below reads these; cfg stays the single
     # source they come from).
@@ -261,7 +311,8 @@ def main():
     # ==================================================================
     # Phase 1: Neural volume (shared cache keyed on geometry params)
     # ==================================================================
-    sig = phase1_signature(vol_sz, vol_depth, vres, seed, "striatum", n_neur)
+    sig = phase1_signature(vol_sz, vol_depth, vres, seed, "striatum", n_neur,
+                           None if n_neur is not None else cfg.neur_density)
     phase1_cache = os.path.join(SHARED_DIR, f"phase1_{sig}.pkl")
     print(f"\n[PHASE 1] Neural volume   (sig={sig})")
     print(f"  shared cache: {phase1_cache}")
@@ -396,10 +447,45 @@ def main():
     spike_params = cfg.build_spike(K, has_axons)
     cal_params = cfg.build_cal()
     profiler.start()
-    time_out = generate_time_traces(
-        spike_params=spike_params, cal_params=cal_params,
-        n_locs=vol_out.locs, verbose=1,
-    )
+    if args.simtrace_design is not None:
+        # Phase 3 spikes come from a sim-trace coupling design; the cached
+        # Phase 1 volume is reused unchanged. use_locs=False avoids building a
+        # K x K x D spatial-distance matrix (K ~ thousands here).
+        from calcia.traces.simtrace_bridge import (
+            generate_time_traces_simtrace, SCALABLE_DESIGNS,
+            hawkes_smallworld, hawkes_scale_free, hmm_gated_hawkes,
+            shared_drive_osc, hmm_gated_drive,
+        )
+        _factories = {
+            "hawkes_smallworld": lambda: hawkes_smallworld(
+                rate=args.simtrace_rate, use_locs=False),
+            "hawkes_scale_free": lambda: hawkes_scale_free(
+                rate=args.simtrace_rate),
+            "hmm_gated_hawkes": lambda: hmm_gated_hawkes(
+                rate=args.simtrace_rate, use_locs=False),
+            "shared_drive_osc": lambda: shared_drive_osc(),
+            "hmm_gated_drive": lambda: hmm_gated_drive(),
+        }
+        # A dense K x K coupling matrix is infeasible past a few thousand
+        # components; block it rather than OOM on a full-size volume.
+        if args.simtrace_design not in SCALABLE_DESIGNS and K > 5000:
+            raise SystemExit(
+                f"Design '{args.simtrace_design}' builds a dense {K}x{K} "
+                f"coupling matrix (~{K*K*8/1e9:.0f} GB) — infeasible for "
+                f"K={K}. Use a scalable design on this volume: "
+                f"{sorted(SCALABLE_DESIGNS)}.")
+        print(f"  Phase 3 driven by sim-trace design: {args.simtrace_design} "
+              f"(rate={args.simtrace_rate})")
+        time_out = generate_time_traces_simtrace(
+            spike_params=spike_params, cal_params=cal_params,
+            model_factory=_factories[args.simtrace_design](),
+            n_locs=vol_out.locs, seed=seed, verbose=1,
+        )
+    else:
+        time_out = generate_time_traces(
+            spike_params=spike_params, cal_params=cal_params,
+            n_locs=vol_out.locs, verbose=1,
+        )
     profiler.stop()
     save_profile(profiler, run_dir, "phase3")
     profiler.reset()
@@ -459,11 +545,16 @@ def main():
     scan_params = cfg.build_scan()
     wf_params = cfg.build_wf()
     cam_params = cfg.build_cam()
+    motion_params = cfg.build_motion()
+    if motion_params is not None:
+        print(f"  motion model: physio (scan_buff={scan_params.scan_buff}, "
+              f"seed={motion_params.seed})")
     profiler.start()
     scan_out = scan_widefield(
         vol_out=vol_out, opt_out=opt_out, time_out=time_out,
         scan_params=scan_params, cam_params=cam_params,
-        wf_params=wf_params, spike_params=spike_params, seed=seed,
+        wf_params=wf_params, spike_params=spike_params,
+        motion_params=motion_params, seed=seed,
     )
     profiler.stop()
     save_profile(profiler, run_dir, "phase4")
@@ -518,7 +609,11 @@ def main():
         axes=np.array("THW"),          # T=frames, H=height(Y), W=width(X)
     )
     if getattr(scan_out, "mot_hist", None) is not None:
-        movies["mot_hist"] = scan_out.mot_hist   # (3, T)
+        movies["mot_hist"] = scan_out.mot_hist   # (3, T) applied XY(Z) shift
+    if getattr(scan_out, "blur_hist", None) is not None:
+        # (2, T) per-frame intra-frame motion-blur streak [dx, dy] in voxels
+        # (physio motion only). Ground truth for de-blur / registration.
+        movies["blur_hist"] = scan_out.blur_hist
     np.savez_compressed(os.path.join(run_dir, "movies.npz"), **movies)
     print(f"  saved movies.npz   mov_noisy {movies['mov_noisy'].shape} (T,H,W)")
 
@@ -528,7 +623,7 @@ def main():
             vol_params=vol_params, psf_params=psf_params,
             spike_params=spike_params, cal_params=cal_params,
             scan_params=scan_params, wf_params=wf_params,
-            cam_params=cam_params,
+            cam_params=cam_params, motion_params=motion_params,
         ), f)
     print("  saved params.pkl")
 
@@ -541,6 +636,11 @@ def main():
         vol_sz=list(vol_sz), vol_depth=vol_depth, vres=vres,
         nt=nt, dt=dt, prot=prot, rate=rate,
         smod=smod, burst_mean=burst_mean, bg_scale=bg_scale,
+        # Records the actual Phase-3 spike source: when set, the built-in
+        # smod/rate above are bypassed by the sim-trace design.
+        simtrace_design=args.simtrace_design,
+        simtrace_rate=(args.simtrace_rate
+                       if args.simtrace_design is not None else None),
         soma_gain=float(soma_gain),
         illum_grad=bool(illum_grad),
         N_neur=int(vol_params.N_neur),
@@ -557,6 +657,26 @@ def main():
     with open(os.path.join(run_dir, "metadata.json"), "w") as f:
         json.dump(meta, f, indent=2)
     print("  saved metadata.json")
+
+    # 3a. Human-readable summary report (FOV / pixel geometry + component
+    # inventory). Reads the just-saved metadata + traces; neur_ves gives the
+    # vessel voxel count without reloading the Phase-1 volume.
+    try:
+        C.write_summary_report(run_dir, neur_ves=vol_out.neur_ves)
+        print("  saved report.md")
+    except Exception as e:
+        print(f"  WARNING: report generation failed (data already saved): {e}")
+
+    # 3b. Visualization bundle (on by default). Built here from the in-memory
+    # vol_out so it never re-reads the multi-GB phase-1 pickle. Non-critical:
+    # the run data is already saved; a failure here must not lose it.
+    if not args.no_viz_prep:
+        try:
+            from calcia.viz.prep import prep_run
+            made = prep_run(run_dir, neur_ves=vol_out.neur_ves, verbose=True)
+            print(f"  saved viz bundle: {', '.join(made)}")
+        except Exception as e:
+            print(f"  WARNING: viz bundle prep failed (data already saved): {e}")
 
     # 4. Display TIFFs (derived; can be regenerated from movies.npz)
     C.save_tiff_normalized(scan_out.mov,
