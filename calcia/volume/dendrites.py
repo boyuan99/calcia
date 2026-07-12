@@ -805,6 +805,327 @@ def _dilate_dendrite_paths(path_vals, path_ids, neur_num, fulldims):
 # Main function
 # ---------------------------------------------------------------------------
 
+def _grow_dendrites_field(
+    vol_params: VolumeParams,
+    dend_params: DendParams,
+    neural_volume: NeuralVolumeResult,
+    vessel_mask: Optional[np.ndarray],
+    positions: np.ndarray,
+    seed: Optional[int] = None,
+    verbose: Optional[int] = None,
+) -> DendriteResult:
+    """Statistical density-field dendrite generation (strategy='field').
+
+    Instead of growing each neuron's dendrites as Dijkstra least-cost paths
+    (strategy='morphology'), scatter a per-neuron radial cloud of dendrite
+    voxels around each soma. There are NO resolved individual branches -- just an
+    aggregate neuropil density, which is all a wide 1P widefield PSF (which blurs
+    + depth-integrates every ~1 um dendrite into a smooth haze) can resolve
+    anyway. This skips the pathfinding + smoothing + dilation entirely: it is
+    O(N x voxels-per-neuron) vectorized numpy scatter, orders of magnitude faster
+    and trivially parallel. Produces a DendriteResult with the SAME structure
+    (uint16 neur_num), so every downstream stage works unchanged; each filled
+    voxel is assigned to a neuron (its dendrite carries that neuron's trace).
+
+    The cloud matches the morphology model's spatial extent (dtParams horizontal
+    / vertical radius); ``DendParams.field_fill`` sets how much of that ellipsoid
+    becomes dendrite (calibrate to the morphology-mode voxel count) and
+    ``field_concentration`` how tightly it packs toward the soma.
+    """
+    vres = vol_params.vres
+    vol_sz = np.array(vol_params.vol_sz)
+    N_neur = vol_params.N_neur
+    verbosity = verbose if verbose is not None else vol_params.verbose
+    fulldims = (vol_sz * vres).astype(int)
+    d0, d1, d2 = int(fulldims[0]), int(fulldims[1]), int(fulldims[2])
+
+    dtParams = dend_params.dtParams
+    R = max(1.0, float(dtParams[1]) * vres)   # horizontal radius (voxels)
+    Zr = max(1.0, float(dtParams[2]) * vres)  # vertical radius (voxels)
+    conc = float(dend_params.field_concentration)
+    ellip_vol = (4.0 / 3.0) * np.pi * R * R * Zr
+    n_per = max(1, int(float(dend_params.field_fill) * ellip_vol))
+
+    neur_soma = neural_volume.neur_soma
+    gp_nuc = neural_volume.gp_nuc
+    gp_soma_input = neural_volume.gp_soma
+    neur_num = neur_soma.copy().astype(np.uint16)
+
+    # Blocked voxels: vessels (dendrites don't grow through them). Somata are
+    # already nonzero in neur_num and skipped by the empty-only write below.
+    vessel_block = None
+    if vessel_mask is not None:
+        if vessel_mask.shape[2] > fulldims[2]:
+            vd = int(vol_params.vol_depth * vres)
+            vessel_block = vessel_mask[:, :, vd:vd + fulldims[2]].astype(bool)
+        else:
+            vessel_block = vessel_mask.astype(bool)
+
+    allroots = np.maximum(np.ceil(vres * positions).astype(int) - 1, 0)
+    for ax in range(3):
+        allroots[:, ax] = np.clip(allroots[:, ax], 0, fulldims[ax] - 1)
+
+    rng = np.random.default_rng(seed)
+    if verbosity >= 1:
+        print(f"Generating dendrite density field (strategy='field'): "
+              f"N={N_neur}, ~{n_per} vox/neuron (R={R:.0f}, Zr={Zr:.0f})")
+
+    nn_flat = neur_num.ravel()
+    vb_flat = vessel_block.ravel() if vessel_block is not None else None
+    for j in range(N_neur):
+        cx, cy, cz = int(allroots[j, 0]), int(allroots[j, 1]), int(allroots[j, 2])
+        # radial cloud: r = R * U^conc concentrates voxels toward the soma
+        rr = R * rng.random(n_per) ** conc
+        th = rng.random(n_per) * (2.0 * np.pi)
+        vx = np.clip((cx + rr * np.cos(th)).astype(np.int64), 0, d0 - 1)
+        vy = np.clip((cy + rr * np.sin(th)).astype(np.int64), 0, d1 - 1)
+        vz = np.clip((cz + (rng.random(n_per) * 2.0 - 1.0) * Zr).astype(np.int64),
+                     0, d2 - 1)
+        flat = np.unique(vx * (d1 * d2) + vy * d2 + vz)  # C-order linear index
+        occ = nn_flat[flat] != 0
+        if vb_flat is not None:
+            occ = occ | vb_flat[flat]
+        nn_flat[flat[~occ]] = np.uint16(j + 1)
+
+    # Match morphology-mode invariants: nuclei cleared, somata restored.
+    for kk in range(N_neur):
+        nuc_idx = gp_nuc[kk][0]
+        soma_idx = gp_soma_input[kk]
+        if len(nuc_idx) > 0:
+            nn_flat[nuc_idx] = 0
+        if len(soma_idx) > 0:
+            nn_flat[soma_idx] = np.uint16(kk + 1)
+
+    dendrite_ad = np.zeros(tuple(fulldims), dtype=np.uint16)
+    gp_soma_out = [(gp_soma_input[kk], np.array([], dtype=np.int32))
+                   for kk in range(N_neur)]
+    if verbosity >= 1:
+        total = int(np.sum((neur_num > 0) & (neur_soma == 0)))
+        print(f"done. Dendrite-field voxels: {total}")
+    return DendriteResult(neur_num=neur_num, dendrite_ad=dendrite_ad,
+                          dend_params=dend_params, gp_soma=gp_soma_out)
+
+
+def _grow_dendrites_space_colonization(
+    vol_params: VolumeParams,
+    dend_params: DendParams,
+    neural_volume: NeuralVolumeResult,
+    vessel_mask: Optional[np.ndarray],
+    positions: np.ndarray,
+    seed: Optional[int] = None,
+    verbose: Optional[int] = None,
+) -> DendriteResult:
+    """Space-colonization dendrite growth (strategy='space_colonization').
+
+    Competitive attractor-based branching (Runions et al. 2007), the algorithm
+    behind realistic tree/venation generation. Instead of routing each neuron's
+    dendrites by shortest path with explicit obstacle avoidance (morphology
+    mode), scatter attractor points in the tissue and grow all neurons' trees
+    TOWARD them simultaneously: each iteration every branch tip steps toward the
+    average direction of nearby attractors, and an attractor is consumed once a
+    tip reaches it. Because ALL neurons share ONE attractor pool, two neurons
+    can't grow into the same attractor -- whoever arrives first consumes it --
+    so dendrites partition space by COMPETITION with no explicit avoidance and
+    no per-neuron Dijkstra. Produces resolved branching morphology (more natural
+    than shortest paths) as a drop-in DendriteResult.
+
+    Trade-off vs morphology: no obstacle-following least-cost routing; the
+    branches are rasterized as thin center-lines (thickness comes from
+    downstream / attractor density, not Rall dilation here).
+    """
+    from scipy.spatial import cKDTree
+
+    vres = vol_params.vres
+    vol_sz = np.array(vol_params.vol_sz)
+    N_neur = vol_params.N_neur
+    verbosity = verbose if verbose is not None else vol_params.verbose
+    fulldims = (vol_sz * vres).astype(int)
+    d0, d1, d2 = int(fulldims[0]), int(fulldims[1]), int(fulldims[2])
+    hi = np.array([d0 - 1, d1 - 1, d2 - 1], dtype=np.float64)
+
+    dtParams = dend_params.dtParams
+    R = max(1.0, float(dtParams[1]) * vres)
+    Zr = max(1.0, float(dtParams[2]) * vres)
+    D = max(1.0, float(dend_params.sc_step_um) * vres)
+    d_i = float(dend_params.sc_influence_um) * vres
+    d_k = float(dend_params.sc_kill_um) * vres
+    n_attr = int(dend_params.sc_attractors_per_neuron)
+    max_iter = int(dend_params.sc_max_iter)
+
+    neur_soma = neural_volume.neur_soma
+    gp_nuc = neural_volume.gp_nuc
+    gp_soma_input = neural_volume.gp_soma
+    neur_num = neur_soma.copy().astype(np.uint16)
+    nn_flat = neur_num.ravel()
+
+    vb_flat = None
+    if vessel_mask is not None:
+        if vessel_mask.shape[2] > fulldims[2]:
+            vd = int(vol_params.vol_depth * vres)
+            vb_flat = vessel_mask[:, :, vd:vd + fulldims[2]].astype(bool).ravel()
+        else:
+            vb_flat = vessel_mask.astype(bool).ravel()
+
+    allroots = np.maximum(np.ceil(vres * positions).astype(int) - 1, 0)
+    for ax in range(3):
+        allroots[:, ax] = np.clip(allroots[:, ax], 0, fulldims[ax] - 1)
+    rng = np.random.default_rng(seed)
+
+    # --- Attractors: n_attr per neuron, uniform in its (R,R,Zr) ellipsoid,
+    #     pooled into ONE shared array (the pool is what creates competition). ---
+    aspect = np.array([1.0, 1.0, Zr / R])
+    attr = np.empty((N_neur * n_attr, 3), dtype=np.float64)
+    for j in range(N_neur):
+        u = rng.standard_normal((n_attr, 3))
+        u /= np.linalg.norm(u, axis=1, keepdims=True) + 1e-12
+        rad = R * rng.random(n_attr) ** (1.0 / 3.0)
+        attr[j * n_attr:(j + 1) * n_attr] = (
+            allroots[j].astype(np.float64) + rad[:, None] * u * aspect)
+    np.clip(attr, 0.0, hi, out=attr)
+    attr_alive = np.ones(len(attr), dtype=bool)
+
+    # --- Nodes: one root per neuron at its soma; grow the forest. ---
+    node_pos = allroots.astype(np.float64).copy()
+    node_nid = np.arange(1, N_neur + 1, dtype=np.int64)
+    node_parent = np.full(N_neur, -1, dtype=np.int64)
+    node_dist = np.zeros(N_neur, dtype=np.float64)  # path distance from soma
+
+    if verbosity >= 1:
+        print(f"Growing dendrites via space colonization: N={N_neur}, "
+              f"{len(attr)} attractors, step={D:.1f} infl={d_i:.0f} kill={d_k:.0f}")
+
+    for _ in range(max_iter):
+        alive = np.flatnonzero(attr_alive)
+        if alive.size == 0:
+            break
+        tree = cKDTree(node_pos)
+        dist, nearest = tree.query(attr[alive], k=1)
+        within = dist <= d_i
+        if not within.any():
+            break
+        nw = nearest[within]
+        dirs = attr[alive][within] - node_pos[nw]
+        unit = dirs / np.maximum(np.linalg.norm(dirs, axis=1, keepdims=True), 1e-9)
+        acc = np.zeros((len(node_pos), 3))
+        np.add.at(acc, nw, unit)
+        grow = np.flatnonzero(np.linalg.norm(acc, axis=1) > 1e-9)
+        if grow.size == 0:
+            break
+        step_dir = acc[grow]
+        step_dir /= np.linalg.norm(step_dir, axis=1, keepdims=True)
+        newp = np.clip(node_pos[grow] + D * step_dir, 0.0, hi)
+        node_pos = np.vstack([node_pos, newp])
+        node_nid = np.concatenate([node_nid, node_nid[grow]])
+        node_parent = np.concatenate([node_parent, grow.astype(np.int64)])
+        node_dist = np.concatenate([node_dist, node_dist[grow] + D])
+        # consume attractors reached by any (new) node
+        dk, _ = cKDTree(node_pos).query(attr[alive], k=1)
+        attr_alive[alive[dk <= d_k]] = False
+
+    # --- Per-node branch radius (dendrites have girth; taper = thinner out) ---
+    #   'none'     : uniform sc_thickness (cheapest).
+    #   'distance' : r = rmax*(1 - dist/max_dist) -- O(nodes), tracked for free.
+    #   'rall'     : r ~ (downstream tip count)^(1/rallexp) per Rall's law --
+    #                one O(nodes) post-order pass (nodes are created
+    #                parent-before-child, so reverse index order is a valid
+    #                post-order), then per-neuron-normalized so each trunk = rmax.
+    taper = dend_params.sc_taper
+    rmax = float(dend_params.sc_thickness)
+    n_nodes = len(node_parent)
+    if taper == "none":
+        node_r = np.full(n_nodes, int(round(rmax)), dtype=np.int64)
+    elif taper == "distance":
+        maxd = np.zeros(N_neur + 1)
+        np.maximum.at(maxd, node_nid, node_dist)
+        md = maxd[node_nid]
+        md[md <= 0] = 1.0
+        node_r = np.round(np.clip(rmax * (1.0 - node_dist / md), 0.0, rmax)
+                          ).astype(np.int64)
+    elif taper == "rall":
+        child_count = np.zeros(n_nodes)
+        np.add.at(child_count, node_parent[node_parent >= 0], 1)
+        subtips = (child_count == 0).astype(np.float64)
+        par = node_parent
+        for i in range(n_nodes - 1, -1, -1):   # post-order: children before parent
+            p = par[i]
+            if p >= 0:
+                subtips[p] += subtips[i]
+        r = subtips ** (1.0 / float(dend_params.rallexp))
+        maxr = np.zeros(N_neur + 1)
+        np.maximum.at(maxr, node_nid, r)
+        mr = maxr[node_nid]
+        mr[mr <= 0] = 1.0
+        node_r = np.round(np.clip(r / mr * rmax, 0.0, rmax)).astype(np.int64)
+    else:
+        raise ValueError(
+            f"Unknown sc_taper {taper!r}. Options: 'none' | 'distance' | 'rall'.")
+
+    # --- Rasterize each edge (parent -> child) into voxels, per-node radius ---
+    child = np.flatnonzero(node_parent >= 0)
+    if child.size > 0:
+        p0 = node_pos[node_parent[child]]
+        p1 = node_pos[child]
+        seglen = np.linalg.norm(p1 - p0, axis=1)
+        nsamp = np.maximum(2, np.ceil(seglen / 0.5).astype(np.int64))
+        seg = np.repeat(np.arange(child.size), nsamp)
+        starts = np.repeat(np.cumsum(nsamp) - nsamp, nsamp)
+        t = (np.arange(seg.size) - starts) / np.maximum(np.repeat(nsamp - 1, nsamp), 1)
+        pts = p0[seg] + t[:, None] * (p1[seg] - p0[seg])
+        vox = np.clip(np.round(pts).astype(np.int64), 0, hi.astype(np.int64))
+        base_nid = node_nid[child][seg]
+        samp_r = node_r[child][seg]
+        # Bucket by integer radius -> a few vectorized ball-splats (b=0 is the
+        # bare center-line). Buckets are small (0..rmax), so this stays O(voxels).
+        flats, nids = [], []
+        for b in range(int(samp_r.max()) + 1):
+            mb = samp_r == b
+            if not mb.any():
+                continue
+            vb, nb = vox[mb], base_nid[mb]
+            if b == 0:
+                flats.append(vb[:, 0] * (d1 * d2) + vb[:, 1] * d2 + vb[:, 2])
+                nids.append(nb)
+            else:
+                g = np.arange(-b, b + 1)
+                ox, oy, oz = np.meshgrid(g, g, g, indexing="ij")
+                ball = (ox**2 + oy**2 + oz**2) <= b * b
+                off = np.stack([ox[ball], oy[ball], oz[ball]], axis=1)
+                vx = np.clip(vb[:, 0:1] + off[:, 0], 0, d0 - 1)
+                vy = np.clip(vb[:, 1:2] + off[:, 1], 0, d1 - 1)
+                vz = np.clip(vb[:, 2:3] + off[:, 2], 0, d2 - 1)
+                flats.append((vx * (d1 * d2) + vy * d2 + vz).ravel())
+                nids.append(np.repeat(nb, off.shape[0]))
+        flat = np.concatenate(flats)
+        nid = np.concatenate(nids)
+        order = np.lexsort((nid, flat))
+        flat_s, nid_s = flat[order], nid[order]
+        first = np.ones(flat_s.size, dtype=bool)
+        first[1:] = flat_s[1:] != flat_s[:-1]
+        uflat, unid = flat_s[first], nid_s[first]
+        empty = nn_flat[uflat] == 0
+        if vb_flat is not None:
+            empty &= ~vb_flat[uflat]
+        nn_flat[uflat[empty]] = unid[empty].astype(np.uint16)
+
+    # Match morphology-mode invariants: nuclei cleared, somata restored.
+    for kk in range(N_neur):
+        nuc_idx = gp_nuc[kk][0]
+        soma_idx = gp_soma_input[kk]
+        if len(nuc_idx) > 0:
+            nn_flat[nuc_idx] = 0
+        if len(soma_idx) > 0:
+            nn_flat[soma_idx] = np.uint16(kk + 1)
+
+    dendrite_ad = np.zeros(tuple(fulldims), dtype=np.uint16)
+    gp_soma_out = [(gp_soma_input[kk], np.array([], dtype=np.int32))
+                   for kk in range(N_neur)]
+    if verbosity >= 1:
+        total = int(np.sum((neur_num > 0) & (neur_soma == 0)))
+        print(f"done. Space-colonization dendrite voxels: {total}")
+    return DendriteResult(neur_num=neur_num, dendrite_ad=dendrite_ad,
+                          dend_params=dend_params, gp_soma=gp_soma_out)
+
+
 def grow_neuron_dendrites(
     vol_params: VolumeParams,
     dend_params: Optional[DendParams] = None,
@@ -812,6 +1133,9 @@ def grow_neuron_dendrites(
     vessel_mask: Optional[np.ndarray] = None,
     positions: Optional[np.ndarray] = None,
     rotation_angles: Optional[List[np.ndarray]] = None,
+    freeze_obstruction: bool = False,
+    seed: Optional[int] = None,
+    strategy: str = "morphology",
     verbose: Optional[int] = None,
 ) -> DendriteResult:
     """
@@ -838,6 +1162,25 @@ def grow_neuron_dendrites(
     """
     if dend_params is None:
         dend_params = DendParams()
+
+    # Strategy dispatch: 'morphology' (default) grows resolved dendrites via
+    # two-level Dijkstra (below); 'field' scatters a fast statistical density
+    # cloud (no resolved branches) -- see _grow_dendrites_field.
+    if strategy == "field":
+        return _grow_dendrites_field(
+            vol_params, dend_params, neural_volume, vessel_mask,
+            positions, seed=seed, verbose=verbose,
+        )
+    if strategy == "space_colonization":
+        return _grow_dendrites_space_colonization(
+            vol_params, dend_params, neural_volume, vessel_mask,
+            positions, seed=seed, verbose=verbose,
+        )
+    if strategy != "morphology":
+        raise ValueError(
+            f"Unknown dendrite strategy {strategy!r}. Options: 'morphology' "
+            "(Dijkstra), 'field' (density cloud), 'space_colonization'."
+        )
 
     vres = vol_params.vres
     vol_sz = np.array(vol_params.vol_sz)
@@ -943,8 +1286,20 @@ def grow_neuron_dendrites(
     path_from_f_out = np.full((*tuple(fdims), 3), -1, dtype=np.int32)
     dijkstra_work = DijkstraWork(n_fine_buf)
 
+    # Frozen-obstruction mode (parallel-ready): read obstruction from a snapshot
+    # taken before the loop, so neurons do NOT avoid each other's thin
+    # centerlines. Drops dendrite-dendrite avoidance (a soft NAOMi modeling
+    # choice) and makes the per-neuron loop independent -> parallelizable.
+    # Default (False) reads the live cell_volume -> bit-identical to before.
+    obstruction_src = cell_volume.copy() if freeze_obstruction else cell_volume
+
     # --- Grow dendrites for each neuron ---
     for j in range(N_neur):
+        if freeze_obstruction and seed is not None:
+            # Per-neuron independent RNG so the output is order-independent
+            # (parallel-safe) and reproducible, not tied to the global-stream
+            # processing order.
+            np.random.seed((int(seed) + j) % (2**31 - 1))
         if verbosity > 1:
             print(f"    Processing neuron {j+1}/{N_neur}...")
 
@@ -960,7 +1315,7 @@ def grow_neuron_dendrites(
 
         # --- Extract local subvolume ---
         obstruction, root_local, border_flag, offsets = _extract_subvolume(
-            cell_volume, allroots[j], fdims, fulldims, small_z
+            obstruction_src, allroots[j], fdims, fulldims, small_z
         )
 
         # Find and clear own cell body from obstruction
@@ -1264,10 +1619,24 @@ def grow_neuron_dendrites(
                 (gc[:, 0], gc[:, 1], gc[:, 2]), tuple(fulldims)
             )
 
-            cell_volume.ravel()[global_flat] += fine_paths_neuron_id.ravel()[fi]
-            cell_volume_idx.ravel()[global_flat] += fine_paths_neuron_id.ravel()[fi]
-            cell_volume_val.ravel()[global_flat] += fine_paths_val.ravel()[fi]
-            cell_volume_ad.ravel()[global_flat] |= fine_paths_ad.ravel()[fi]
+            if freeze_obstruction:
+                # Collision-safe merge: assign each voxel to the FIRST neuron to
+                # claim it. In the ascending sequential loop that is the
+                # smallest-index neuron -> an order-INDEPENDENT winner (so the
+                # parallel merge, which resolves collisions the same min-index
+                # way, matches). No ID summing -> no corruption; cross-neuron
+                # thickness is not accumulated (each voxel has one owner).
+                empty = cell_volume_idx.ravel()[global_flat] == 0
+                gfe = global_flat[empty]
+                fie = fi[empty]
+                cell_volume_idx.ravel()[gfe] = fine_paths_neuron_id.ravel()[fie]
+                cell_volume_val.ravel()[gfe] = fine_paths_val.ravel()[fie]
+                cell_volume_ad.ravel()[gfe] = fine_paths_ad.ravel()[fie]
+            else:
+                cell_volume.ravel()[global_flat] += fine_paths_neuron_id.ravel()[fi]
+                cell_volume_idx.ravel()[global_flat] += fine_paths_neuron_id.ravel()[fi]
+                cell_volume_val.ravel()[global_flat] += fine_paths_val.ravel()[fi]
+                cell_volume_ad.ravel()[global_flat] |= fine_paths_ad.ravel()[fi]
 
         # Touched-only reset: every nonzero accumulator cell this iteration is a
         # subset of fine_idxs3, so clearing those restores the all-zero invariant
@@ -1286,6 +1655,11 @@ def grow_neuron_dendrites(
     # --- Post-processing: dilate and finalize ---
     if verbosity >= 1:
         print("Dilating dendrite paths...")
+
+    if freeze_obstruction and seed is not None:
+        # Deterministic seed for the post-loop stochastic rounding + dilation
+        # (also order-independent).
+        np.random.seed((int(seed) + N_neur) % (2**31 - 1))
 
     # Stochastic rounding of thickness values
     cell_volume_val_uint = np.floor(cell_volume_val).astype(np.uint16)

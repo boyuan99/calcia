@@ -84,6 +84,7 @@ def simulate_neural_volume(
     psf_params: Optional[PsfParams] = None,
     *,
     seed: Optional[int] = None,
+    dendrite_strategy: str = "morphology",
     verbose: Optional[int] = None,
 ) -> NeuralVolumeOutput:
     """Run the full Phase 1 neural volume simulation pipeline.
@@ -239,7 +240,8 @@ def simulate_neural_volume(
 
     dend_result = grow_neuron_dendrites(
         vol_params, dend_params, vol_result,
-        positions=positions, rotation_angles=angles, verbose=v,
+        positions=positions, rotation_angles=angles,
+        strategy=dendrite_strategy, seed=seed, verbose=v,
     )
     # dend_params may be updated (e.g. dims/dimsSS adjusted)
     dend_params = dend_result.dend_params

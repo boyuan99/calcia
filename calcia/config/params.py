@@ -210,6 +210,25 @@ class DendParams:
     rallexp: float = 1.5
     dendVar: Optional[float] = None
     apicalVar: Optional[float] = None
+    # --- Statistical density-field strategy (grow_neuron_dendrites
+    # strategy='field'): fast neuropil generation for the imaging-limited case
+    # (a wide 1P widefield PSF resolves no single dendrite anyway). field_fill =
+    # fraction of the per-neuron dendrite ellipsoid that becomes dendrite voxels;
+    # field_concentration > 0.5 packs them toward the soma (density decays out). ---
+    field_fill: float = 0.00065
+    field_concentration: float = 1.0
+    # --- Space-colonization strategy (strategy='space_colonization'):
+    # competitive attractor-based branching growth (Runions et al. 2007). All
+    # neurons share ONE attractor pool, so dendrites partition space by
+    # competition (whoever reaches an attractor first consumes it) -- no explicit
+    # avoidance, resolved branches, more parallel than per-neuron Dijkstra. ---
+    sc_attractors_per_neuron: int = 250
+    sc_step_um: float = 3.0        # growth increment D per iteration
+    sc_influence_um: float = 25.0  # a node "sees" attractors within this radius
+    sc_kill_um: float = 6.0        # attractor consumed when a node gets this close
+    sc_max_iter: int = 120
+    sc_thickness: int = 1          # max branch radius (voxels, near soma); 0 = skeleton
+    sc_taper: str = "none"         # branch taper: 'none' | 'distance' | 'rall'
 
 
 @dataclass
