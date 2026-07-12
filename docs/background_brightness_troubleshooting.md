@@ -139,7 +139,7 @@ actually measures:**
 - `bg_scale=0.1` is best read as a **neuropil-amplitude calibration**, not "deleting
   background" — it scales the axon traces to ~10%, the level where soma again carries the
   image. **Applied as the default** in `examples/demo_widefield_striatum_v1.py` (`--bg-scale`,
-  default 0.1) and `examples/striatum_demix_dataset.py` (`BG_SCALE=0.1`).
+  default 0.1) and `examples/archive/striatum_demix_dataset.py` (`BG_SCALE=0.1`).
 - The NAOMi1p dendrite ×1% rescale was tested (via a temporary `ScanParams.dend_amp_scale`
   knob) and proved near-inert for striatum (dends contribute little vs axons), so it was
   NOT kept in the API. Re-port from `scan_volume_1p.m:321-326` if a cortex case needs it.

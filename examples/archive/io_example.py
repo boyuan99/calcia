@@ -5,6 +5,9 @@ Demonstrates the unified JSON format for saving and loading
 complete volume simulations.
 """
 
+import os as _os, sys as _sys  # archived: find sibling helpers in ../
+_sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+
 import numpy as np
 import sys
 from pathlib import Path

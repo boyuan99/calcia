@@ -18,6 +18,9 @@ Usage:
     conda run -n calcia python examples/demo_full_pipeline.py --large   # full-size
 """
 
+import os as _os, sys as _sys  # archived: find sibling helpers in ../
+_sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+
 import argparse
 import os
 

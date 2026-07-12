@@ -16,6 +16,9 @@ Run:
     # subset:
     conda run -n calcia python examples/striatum_param_sweep.py --axes NA depth
 """
+
+import os as _os, sys as _sys  # archived: find sibling helpers in ../
+_sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
 import argparse
 import copy
 import datetime as _dt

@@ -13,6 +13,9 @@ ground truth; use a thinner slab for stricter in-focus). Calibrated defaults
 
 Run:  conda run -n calcia python examples/striatum_demix_dataset.py
 """
+
+import os as _os, sys as _sys  # archived: find sibling helpers in ../
+_sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
 import datetime as _dt
 import json
 import os

@@ -19,6 +19,9 @@ Usage:
     conda run -n calcia python examples/demo_simtrace_pipeline.py --design hawkes_scale_free --nt 400
 """
 
+import os as _os, sys as _sys  # archived: find sibling helpers in ../
+_sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+
 import argparse
 import os
 import pickle

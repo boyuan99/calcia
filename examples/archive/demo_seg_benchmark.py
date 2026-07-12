@@ -20,6 +20,9 @@ Usage (paths default to the striatum benchmark bundle):
 
 from __future__ import annotations
 
+import os as _os, sys as _sys  # archived: find sibling helpers in ../
+_sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+
 import argparse
 import os
 
