@@ -142,6 +142,61 @@ def parse_args():
                         "shifts (see data/real/398_09192025_gcamp_mc_shifts.mat). "
                         "physio auto-bumps scan_buff to 30 (real range ~+/-26 um).")
     p.add_argument("--prot", type=str, default="GCaMP6f")
+    p.add_argument("--dendrite-strategy", type=str, default="morphology",
+                   dest="dendrite_strategy",
+                   choices=["morphology", "field", "space_colonization"],
+                   help="Phase-1 dendrite generation strategy: 'morphology' "
+                        "(Dijkstra, default), 'field' (fast statistical density "
+                        "cloud -- makes dense full runs tractable), or "
+                        "'space_colonization'.")
+    p.add_argument("--depth-um", type=int, default=None, dest="depth_um",
+                   help="Volume/imaging depth in um (overrides preset). Deep "
+                        "(e.g. 180) gives the washed out-of-focus haze of real 1P.")
+    p.add_argument("--psf-support-um", type=float, default=None,
+                   dest="psf_support_um",
+                   help="Lateral PSF array support (um). Preset default is 12; the "
+                        "two-scale halo is CLIPPED to this footprint, so a wide halo "
+                        "needs a wide support. KEEPER uses 100 (-> 30um FWHM blobs).")
+    p.add_argument("--halo-um", type=float, default=0.0, dest="halo_um",
+                   help="Two-scale PSF halo radius (um). >0 broadens the emission "
+                        "PSF into a soft wide halo (KEEPER realism); 0 = off. "
+                        "Needs --psf-support-um wide enough (>~3x halo) or it clips.")
+    p.add_argument("--halo-weight", type=float, default=0.8, dest="halo_weight",
+                   help="Two-scale PSF halo weight (fraction of energy in the halo).")
+    p.add_argument("--bright-frac", type=float, default=None, dest="bright_frac",
+                   help="Fraction of somata boosted so they pop out (cosmetic). "
+                        "0 = none -> cells blend into the wash (KEEPER-like). "
+                        "Overrides preset (full preset default is 0.2).")
+    p.add_argument("--focal-depth", type=float, default=None, dest="focal_depth",
+                   help="Focal-plane depth (um into the volume); overrides preset.")
+    p.add_argument("--hemo-abs-mult", type=float, default=1.0, dest="hemo_abs_mult",
+                   help="Scale the widefield hemoglobin absorption (col mask). >1 "
+                        "deepens vessel shadows toward black (KEEPER-like) without "
+                        "regenerating the volume. 1.0 = preset default.")
+    p.add_argument("--gen-margin-um", type=float, default=0.0, dest="gen_margin_um",
+                   help="Generate the volume this many um LARGER on each lateral "
+                        "side, then image only the central target FOV. Pushes the "
+                        "background neuropil edge pile-up outside the imaged region "
+                        "(clean borders while keeping a bright washed background). "
+                        "Requires regenerating Phase-1 at the larger size.")
+    p.add_argument("--image-crop-um", type=float, default=0.0, dest="image_crop_um",
+                   help="Crop this many um from each lateral side of the OUTPUT "
+                        "movie (no change to generation, so any cached volume is "
+                        "reused). Drops the background edge pile-up frame for free "
+                        "at the cost of a smaller imaged FOV. ~110 clears the frame "
+                        "with a 100um-support PSF. Composes with --gen-margin-um.")
+    p.add_argument("--neuropil-fill", type=float, default=None, dest="neuropil_fill",
+                   help="AxonParams.maxfill: fraction of the background volume the "
+                        "axon neuropil fills (preset default 0.5). RAISE it to "
+                        "generate a DENSER neuropil that fills the discrete-process "
+                        "gaps (the dark 'holes') at the source, instead of blurring "
+                        "over them with the PSF. Changes Phase-1 -> new cache.")
+    p.add_argument("--process-thickness", type=float, default=None,
+                   dest="process_thickness",
+                   help="DendParams.thicknessScale (preset default 0.5): dilation "
+                        "width of dendrite/neuropil processes. Higher = fatter "
+                        "processes that close the inter-process gaps. Changes "
+                        "Phase-1 -> new cache.")
     p.add_argument("--simtrace-design", type=str, default=None,
                    dest="simtrace_design",
                    choices=["hawkes_smallworld", "hawkes_scale_free",
@@ -167,10 +222,13 @@ def parse_args():
     return p.parse_args()
 
 
-def phase1_signature(vol_sz, vol_depth, vres, seed, region, n_neur, neur_density=None):
+def phase1_signature(vol_sz, vol_depth, vres, seed, region, n_neur,
+                     neur_density=None, strategy="morphology",
+                     neuropil_fill=None, process_thickness=None):
     h = hashlib.sha1()
     h.update(repr((tuple(vol_sz), vol_depth, vres, seed, region,
-                   n_neur, neur_density)).encode())
+                   n_neur, neur_density, strategy,
+                   neuropil_fill, process_thickness)).encode())
     return h.hexdigest()[:10]
 
 
@@ -231,6 +289,22 @@ def main():
     cfg.bg_scale = args.bg_scale
     cfg.motion_model = args.motion_model
     cfg.prot = args.prot
+    if args.depth_um is not None:
+        cfg.depth_um = args.depth_um
+    if args.bright_frac is not None:
+        cfg.bright_frac = args.bright_frac
+    if args.focal_depth is not None:
+        cfg.focal_depth_um = args.focal_depth
+    if args.psf_support_um is not None:
+        cfg.psf_sz = (args.psf_support_um, args.psf_support_um, cfg.psf_sz[2])
+    # Generate a larger volume than we image, then crop the movie to the central
+    # target FOV (see --gen-margin-um). Keeps the imaged field free of the
+    # background neuropil edge pile-up without dimming the wash. cfg.vol_um now
+    # holds the GENERATED size (so vol_sz / phase1 signature / density scale with
+    # it); target_vol_um is the FOV we actually keep.
+    target_vol_um = cfg.vol_um
+    if args.gen_margin_um > 0:
+        cfg.vol_um = int(round(target_vol_um + 2 * args.gen_margin_um))
     if args.vres is not None:
         cfg.vres = args.vres
     if args.n_neur is not None:
@@ -278,6 +352,9 @@ def main():
     run_dir = os.path.join(OUTPUT_ROOT, f"{tag}_{ts}")
     os.makedirs(run_dir, exist_ok=False)
     os.makedirs(SHARED_DIR, exist_ok=True)
+    # Real-time run log: tee stdout/stderr (line-buffered) so full-run progress
+    # streams live to disk and survives a kill (verbose=1 below feeds it).
+    C.tee_stdout(f"{tag}_{ts}", output_dir=run_dir)
 
     n_vox = (vol_sz[0] * vres) * (vol_sz[1] * vres) * (vol_sz[2] * vres)
     print("=" * 60)
@@ -312,7 +389,10 @@ def main():
     # Phase 1: Neural volume (shared cache keyed on geometry params)
     # ==================================================================
     sig = phase1_signature(vol_sz, vol_depth, vres, seed, "striatum", n_neur,
-                           None if n_neur is not None else cfg.neur_density)
+                           None if n_neur is not None else cfg.neur_density,
+                           strategy=args.dendrite_strategy,
+                           neuropil_fill=args.neuropil_fill,
+                           process_thickness=args.process_thickness)
     phase1_cache = os.path.join(SHARED_DIR, f"phase1_{sig}.pkl")
     print(f"\n[PHASE 1] Neural volume   (sig={sig})")
     print(f"  shared cache: {phase1_cache}")
@@ -323,9 +403,26 @@ def main():
             vol_out, vol_params = pickle.load(f)
     else:
         print("  -> cache miss, generating (slow)")
+        # Denser neuropil (fills the discrete-process 'holes' at the source rather
+        # than blurring over them). maxfill raises axon fill fraction; thicknessScale
+        # fattens processes. Region defaults overwrite dtParams/atParams but leave
+        # thicknessScale/maxfill, so these overrides stick.
+        _axon_params = _dend_params = None
+        if args.neuropil_fill is not None:
+            from calcia.config.params import AxonParams
+            _axon_params = AxonParams(maxfill=args.neuropil_fill)
+            print(f"  neuropil density: AxonParams.maxfill={args.neuropil_fill} "
+                  f"(default 0.5)")
+        if args.process_thickness is not None:
+            from calcia.config.params import DendParams
+            _dend_params = DendParams(thicknessScale=args.process_thickness)
+            print(f"  process thickness: DendParams.thicknessScale="
+                  f"{args.process_thickness} (default 0.5)")
         profiler.start()
         vol_out = simulate_neural_volume(
             vol_params=vol_params, seed=seed, verbose=1,
+            dendrite_strategy=args.dendrite_strategy,
+            axon_params=_axon_params, dend_params=_dend_params,
         )
         profiler.stop()
         save_profile(profiler, run_dir, "phase1")
@@ -417,6 +514,12 @@ def main():
     print("\n[PHASE 2] Optical propagation (widefield)")
     t0 = time.time()
     psf_params = cfg.build_psf()
+    if args.hemo_abs_mult != 1.0:
+        from dataclasses import replace as _replace
+        psf_params = _replace(
+            psf_params, hemo_abs_wf=psf_params.hemo_abs_wf * args.hemo_abs_mult)
+        print(f"  hemoglobin absorption x{args.hemo_abs_mult} "
+              f"-> hemo_abs_wf={psf_params.hemo_abs_wf:.4f} (deeper vessels)")
     profiler.start()
     opt_out = simulate_optical_propagation(
         vol_params=vol_params, psf_params=psf_params,
@@ -425,6 +528,14 @@ def main():
     profiler.stop()
     save_profile(profiler, run_dir, "phase2")
     profiler.reset()
+    # Two-scale PSF lateral-scatter broadening (KEEPER realism practice): add a
+    # soft wide halo to the diffraction-limited emission PSF so resolved cells
+    # wash into a smooth cloud (real 1P look) instead of staying sharp points.
+    if args.halo_um and args.halo_um > 0:
+        opt_out.psf = C.broaden_psf_two_scale(
+            opt_out.psf, args.halo_um, args.halo_weight, vres)
+        print(f"  two-scale PSF: halo={args.halo_um}um weight={args.halo_weight}"
+              f"  -> PSF {opt_out.psf.shape}")
     timings["phase2"] = time.time() - t0
     print(f"  done in {timings['phase2']:.1f}s   PSF {opt_out.psf.shape}")
 
@@ -562,6 +673,24 @@ def main():
     timings["phase4"] = time.time() - t0
     print(f"  done in {timings['phase4']:.1f}s   movie {scan_out.mov.shape}")
 
+    # Image only the central FOV, leaving the background neuropil edge pile-up
+    # (which grows with bg_scale and is spread ~PSF-half-width inward) outside the
+    # imaged field. Two contributions, both cropped from the output movie:
+    #   * gen_margin_um: extra volume generated beyond the target FOV, and
+    #   * image_crop_um: extra crop of an as-generated volume (no regen).
+    # Crop is symmetric in movie pixels: um * vres / sfrac.
+    _crop_um = args.gen_margin_um + args.image_crop_um
+    if _crop_um > 0:
+        cpx = int(round(_crop_um * vres / scan_params.sfrac))
+        if cpx > 0:
+            for _attr in ("mov", "mov_raw", "mov_infocus", "mov_oof"):
+                _m = getattr(scan_out, _attr, None)
+                if _m is not None:
+                    setattr(scan_out, _attr, _m[cpx:-cpx, cpx:-cpx, :])
+            print(f"  imaged central FOV: cropped {cpx}px/side ({_crop_um:.0f}um) "
+                  f"-> {scan_out.mov.shape[:2]}  (generated {cfg.vol_um}um, "
+                  f"imaged ~{target_vol_um - 2 * args.image_crop_um:.0f}um)")
+
     # Out-of-focus haze (smoothing): real 1P widefield integrates a large
     # defocused PSF over the whole depth, blurring the field into a SMOOTH
     # washed cloud. NAOMi's widefield PSF keeps too much fine structure, so the
@@ -648,6 +777,9 @@ def main():
         N_soma_traces=int(time_out.soma.shape[0]),  # incl. appended bg components
         total_spikes=n_spk,
         movie_shape=list(scan_out.mov.shape),
+        gen_margin_um=float(args.gen_margin_um),
+        image_crop_um=float(args.image_crop_um),
+        imaged_fov_um=int(target_vol_um - 2 * args.image_crop_um),  # central FOV kept
         timings_seconds={k: float(v) for k, v in timings.items()},
         timings_total_seconds=float(sum(timings.values())),
         phase1_cache=phase1_cache,

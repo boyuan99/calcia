@@ -115,6 +115,12 @@ def parse_args():
     p.add_argument("--nt", type=int, default=None,
                    help="Frames (default: same as the matched GCaMP run). Lower "
                         "it for a faster preview on the same volume.")
+    p.add_argument("--image-crop-um", type=float, default=0.0, dest="image_crop_um",
+                   help="Crop this many um from each lateral side of the OUTPUT "
+                        "movie. Use it to (a) drop the background edge pile-up frame "
+                        "and (b) match a GCaMP run generated with --gen-margin-um / "
+                        "--image-crop-um so the two colour channels image the SAME "
+                        "central FOV. Pass the same value as the matched GCaMP run.")
     p.add_argument("--motion", choices=["physio", "randomwalk"], default="physio",
                    help="Sample-motion model (default physio, matching the run).")
     p.add_argument("--motion-seed", type=int, default=None, dest="motion_seed",
@@ -400,6 +406,20 @@ def main():
         bg_scale=args.bg_scale, neuropil_smooth_um=args.neuropil_smooth_um,
         soma_blur_um=args.soma_blur_um, soma_scale=args.soma_scale,
         halo_um=args.halo_um, halo_weight=args.halo_weight)
+    # Image only the central FOV: drop the background neuropil edge pile-up frame
+    # and match a GCaMP run cropped the same way (same central region -> the two
+    # colour channels stay co-registered). Crop in movie px: um * vres / sfrac.
+    if args.image_crop_um and args.image_crop_um > 0:
+        cpx = int(round(args.image_crop_um * vres / params_dict["scan_params"].sfrac))
+        if cpx > 0:
+            noisy = noisy[cpx:-cpx, cpx:-cpx, :]
+            clean = clean[cpx:-cpx, cpx:-cpx, :]
+            for _a in ("mov", "mov_raw", "mov_infocus", "mov_oof"):
+                _m = getattr(scan_out, _a, None)
+                if _m is not None:
+                    setattr(scan_out, _a, _m[cpx:-cpx, cpx:-cpx, :])
+            print(f"  imaged central FOV: cropped {cpx}px/side "
+                  f"({args.image_crop_um:.0f}um) -> {noisy.shape[:2]}")
     print(f"  done ({time.time()-t0:.1f}s)  movie {noisy.shape}  "
           f"noisy[{noisy.min():.0f}, {noisy.max():.0f}]")
     print_comparison("tdt", noisy)
@@ -435,6 +455,7 @@ def main():
         total_spikes=0,
         motion_model=args.motion, seed=int(seed), motion_seed=int(motion_seed),
         motion_shared_with_gcamp=bool(shared), nt=int(nt), dt=1/20,
+        image_crop_um=float(args.image_crop_um),
         vres=int(vres), vol_sz=list(vol_params.vol_sz),
         N_neur=int(getattr(vol_params, "N_neur", 0)),
         lambda_em_um=STATIC_PRESETS["tdt"]["lambda_em_um"],
