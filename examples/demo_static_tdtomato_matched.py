@@ -336,7 +336,7 @@ def run_tdt(vol_out, vol_params, nt, seed, expr_ids, label_frac,
 
 def main():
     args = parse_args()
-    C.tee_stdout("scan_tdt")  # save this run's full console output to output/logs/
+    import _instrument; _instrument.start("scan_tdt")  # run log + pyinstrument
     profiler = None
     if args.profile:
         from pyinstrument import Profiler

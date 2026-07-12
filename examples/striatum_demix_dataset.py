@@ -104,4 +104,5 @@ def main():
 
 
 if __name__ == "__main__":
+    import _instrument; _instrument.start()  # run log + pyinstrument (mandated)
     main()
