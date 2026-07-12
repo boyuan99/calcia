@@ -610,24 +610,42 @@ def sort_axons(
                 coords = np.array(np.unravel_index(idx, tuple(volsize)))
                 gp_bgpos[kk] = coords.mean(axis=1)
 
-        # Distance matrix (MATLAB lines 86-89)
-        cell_pos2 = cell_pos[:N_comps]
-        dist_mat = np.sqrt(
-            (cell_pos2[:, 0:1] - gp_bgpos[:, 0:1].T) ** 2
-            + (cell_pos2[:, 1:2] - gp_bgpos[:, 1:2].T) ** 2
-            + (cell_pos2[:, 2:3] - gp_bgpos[:, 2:3].T) ** 2
-        )
+        # Greedy nearest-available-axon per cell, via a KDTree over the axon
+        # centroids. Semantically identical to the old full (N_comps x n_axons)
+        # distance matrix + per-cell argmin + column-removal, but O((N+M) log M)
+        # time and O(M) memory instead of O(N*M): the matrix materialised
+        # ~N_comps*n_axons floats (>60 GB at high neuropil density -> OOM). The
+        # only possible divergence from the old result is on EXACT distance ties
+        # (argmin picks the lowest index; the tree may pick another) — negligible
+        # for float centroids and immaterial to the ownerless-neuropil grouping.
+        from scipy.spatial import cKDTree
 
-        # Greedy nearest-neighbour (MATLAB lines 91-98)
+        cell_pos2 = cell_pos[:N_comps]
+        tree = cKDTree(gp_bgpos)
+        taken = np.zeros(n_axons, dtype=bool)
         assigned = set()
         for ii in range(min(N_comps, n_axons)):
-            idx = np.argmin(dist_mat[ii])
-            dist_mat[:, idx] = np.inf
+            k = 8
+            idx = None
+            while True:
+                kq = min(k, n_axons)
+                _d, cand = tree.query(cell_pos2[ii], k=kq)
+                for c in np.atleast_1d(cand):
+                    c = int(c)
+                    if not taken[c]:
+                        idx = c
+                        break
+                if idx is not None or kq >= n_axons:
+                    break
+                k *= 4
+            if idx is None:   # every axon already assigned (n_axons <= N_comps)
+                break
+            taken[idx] = True
+            assigned.add(idx)
             bg_proc[ii] = BgProcessData(
                 indices=gp_bgvals[idx][0].copy(),
                 fluorescence=gp_bgvals[idx][1].copy(),
             )
-            assigned.add(idx)
 
         # Random assignment of remaining (MATLAB lines 100-106)
         for kk in range(n_axons):
