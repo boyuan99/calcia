@@ -475,11 +475,18 @@ def sample_dense_neurons(
     angles_list = []
     positions_list = []
 
-    for k in range(n_neur_target):
-        # Check termination condition
-        n_good = np.sum(idx_good)
-        n_bad = np.sum(idx_bad)
+    # O(N) sampling state: keep RUNNING valid counts (so we never re-sum the
+    # whole grid each iteration) and a local exclusion-box radius (so we never
+    # build a whole-volume distance field just to exclude a min_dist sphere).
+    # These turn the loop from O(N * V) into ~O(N).
+    n_good = int(np.sum(idx_good))
+    n_bad = int(np.sum(idx_bad))
+    gs0, gs1, gs2 = grid_shape
+    excl_r = int(np.ceil(eta * min_dist * vres))  # box half-size >= eta*min_dist
+    reject_cap = 64
 
+    for k in range(n_neur_target):
+        # Termination via running counts (no whole-grid re-sum).
         if n_good == 0 and n_bad == 0:
             if verbose >= 1:
                 print(f"No valid positions remaining. Stopping at {k} neurons.")
@@ -490,18 +497,29 @@ def sample_dense_neurons(
             neur_params, vertices=vertices, faces=faces
         )
 
-        # Sample position from valid locations
-        if n_good > 0:
-            # Sample from idx_good (preferred)
-            valid_indices = np.flatnonzero(idx_good.ravel())
-            chosen_flat = valid_indices[np.random.randint(len(valid_indices))]
-        else:
-            # Fallback to idx_bad
-            valid_indices = np.flatnonzero(idx_bad.ravel())
-            chosen_flat = valid_indices[np.random.randint(len(valid_indices))]
+        # Sample a valid position by REJECTION: pick a uniform-random voxel and
+        # retry if it is not valid. This is the SAME distribution as scanning the
+        # whole mask (uniform over valid voxels) but O(1) amortized instead of an
+        # O(V) flatnonzero every iteration. Only when the mask is nearly
+        # saturated (rejection keeps failing) do we fall back to a single scan.
+        mask = idx_good if n_good > 0 else idx_bad
+        ix = iy = iz = None
+        for _ in range(reject_cap):
+            cx = np.random.randint(gs0)
+            cy = np.random.randint(gs1)
+            cz = np.random.randint(gs2)
+            if mask[cx, cy, cz]:
+                ix, iy, iz = cx, cy, cz
+                break
+        if ix is None:  # nearly saturated -> exact scan (rare)
+            valid_indices = np.flatnonzero(mask.ravel())
+            if len(valid_indices) == 0:
+                if verbose >= 1:
+                    print(f"No valid positions remaining. Stopping at {k} neurons.")
+                break
+            ix, iy, iz = np.unravel_index(
+                valid_indices[np.random.randint(len(valid_indices))], grid_shape)
 
-        # Convert flat index to 3D coordinates
-        ix, iy, iz = np.unravel_index(chosen_flat, grid_shape)
         new_pos = np.array([x_coords[ix], y_coords[iy], z_coords[iz]], dtype=np.float32)
 
         # Special case: center single neuron
@@ -517,30 +535,28 @@ def sample_dense_neurons(
         neurons.append((Vcell_translated, Vnuc_translated, faces))
         angles_list.append(rot_angles)
 
-        # Update exclusion masks using vectorized distance calculation
-        # Create coordinate arrays for efficient distance computation
-        xx = np.arange(grid_shape[0], dtype=np.float32)
-        yy = np.arange(grid_shape[1], dtype=np.float32)
-        zz = np.arange(grid_shape[2], dtype=np.float32)
-
-        # Compute squared distance in voxel space
-        dx = (xx - ix)[:, None, None]
-        dy = (yy - iy)[None, :, None]
-        dz = (zz - iz)[None, None, :]
-
-        dist_sq_voxels = dx**2 + dy**2 + dz**2
-
-        # Convert to micrometers
-        dist_um = np.sqrt(dist_sq_voxels) / vres
-
-        # Exclude from idx_good using eta * min_dist
-        idx_good[dist_um <= eta * min_dist] = False
-
-        # Exclude from idx_bad using strict min_dist
-        idx_bad[dist_um <= min_dist] = False
-
-        # Synchronize: idx_good should not have any positions that idx_bad excludes
-        idx_good = idx_good & idx_bad
+        # LOCAL exclusion: only touch the box that can possibly contain excluded
+        # voxels (radius eta*min_dist), not the whole grid. Identical result to
+        # the whole-volume masking (voxels outside are > min_dist, never
+        # excluded) at O(min_dist^3) instead of O(V). The running valid counts
+        # are updated by the box's before/after delta.
+        x0, x1 = max(0, ix - excl_r), min(gs0, ix + excl_r + 1)
+        y0, y1 = max(0, iy - excl_r), min(gs1, iy + excl_r + 1)
+        z0, z1 = max(0, iz - excl_r), min(gs2, iz + excl_r + 1)
+        lx = np.arange(x0, x1, dtype=np.float32) - ix
+        ly = np.arange(y0, y1, dtype=np.float32) - iy
+        lz = np.arange(z0, z1, dtype=np.float32) - iz
+        dist_um = np.sqrt(lx[:, None, None]**2 + ly[None, :, None]**2
+                          + lz[None, None, :]**2) / vres
+        gb = idx_good[x0:x1, y0:y1, z0:z1]
+        bb = idx_bad[x0:x1, y0:y1, z0:z1]
+        g_before = int(gb.sum())
+        b_before = int(bb.sum())
+        gb[dist_um <= eta * min_dist] = False
+        bb[dist_um <= min_dist] = False
+        gb &= bb  # idx_good subset of idx_bad (only changes inside this box)
+        n_good += int(gb.sum()) - g_before
+        n_bad += int(bb.sum()) - b_before
 
         if verbose >= 2:
             print(f"Placed neuron {k + 1}/{n_neur_target} at ({new_pos[0]:.1f}, {new_pos[1]:.1f}, {new_pos[2]:.1f})")
