@@ -47,6 +47,8 @@ from .vasculature import (
     pseudo_rand_sample_3d,
 )
 
+from .postprocess import fill_nuclei
+
 __all__ = [
     # Neurons
     "generate_neural_body",
@@ -83,4 +85,6 @@ __all__ = [
     "grow_capillaries",
     "pseudo_rand_sample_2d",
     "pseudo_rand_sample_3d",
+    # Post-generation volume edits
+    "fill_nuclei",
 ]

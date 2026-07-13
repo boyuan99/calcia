@@ -8,6 +8,13 @@ from .overlap import (
     pairwise_overlap,
     summarize,
 )
+from .image_metrics import (
+    brightest_frame,
+    cv_bright,
+    dF,
+    print_comparison,
+    summary_stats,
+)
 
 __all__ = [
     "OverlapReport",
@@ -16,4 +23,10 @@ __all__ = [
     "owner_count_histogram",
     "pairwise_overlap",
     "summarize",
+    # Scanned-movie image-quality metrics
+    "brightest_frame",
+    "cv_bright",
+    "dF",
+    "print_comparison",
+    "summary_stats",
 ]

@@ -39,6 +39,13 @@ from .legacy import (
     detect_format_version,
     upgrade_legacy_format,
 )
+from .render import (
+    load_phase1,
+    make_video,
+    save_tif,
+    save_tiff_normalized,
+)
+from .bundle import save_full_bundle, write_summary_report
 
 __all__ = [
     # Schema
@@ -58,4 +65,12 @@ __all__ = [
     # Legacy
     "detect_format_version",
     "upgrade_legacy_format",
+    # Rendering / movie IO
+    "load_phase1",
+    "make_video",
+    "save_tif",
+    "save_tiff_normalized",
+    # Full run bundle + report
+    "save_full_bundle",
+    "write_summary_report",
 ]

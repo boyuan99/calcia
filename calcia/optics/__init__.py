@@ -17,6 +17,7 @@ from .fresnel import (
     zernike_polynomial,
 )
 from .fresnel_psf import decompose_vessel_volume, gen_cortical_light_path_lite
+from .scatter import broaden_psf_scatter, broaden_psf_two_scale
 
 __all__ = [
     # Main entry point
@@ -42,4 +43,7 @@ __all__ = [
     "zernike_polynomial",
     "decompose_vessel_volume",
     "gen_cortical_light_path_lite",
+    # Tissue-scatter PSF broadening
+    "broaden_psf_scatter",
+    "broaden_psf_two_scale",
 ]

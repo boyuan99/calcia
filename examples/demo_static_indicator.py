@@ -48,72 +48,13 @@ import time
 import numpy as np
 
 import _striatum_common as C
+from calcia.config import STATIC_PRESETS, REAL_TARGETS
+from calcia.diagnostics import print_comparison, summary_stats
 
 
 OUTPUT_ROOT = os.path.join(os.path.dirname(__file__), "output")
 SHARED_DIR = os.path.join(OUTPUT_ROOT, "_shared")
 REAL_DIR = "C:/Users/boyuan/Downloads/tdt-bfp"
-
-
-# ======================================================================
-# Per-channel presets (tuned against the real tdt-bfp striatum recordings)
-# ======================================================================
-# Each preset carries: optics (emission wavelength, tissue scatter length),
-# widefield excitation, the label localization (cytoplasmic vs nuclear), the
-# brightness/photon split (pavg + gain), the diffuse-background scale, the
-# out-of-focus blur, and the camera bias pedestal. The values are intensive
-# (CV / ratios / per-pixel ADU) so they hold across FOV size.
-STATIC_PRESETS = {
-    "tdt": dict(
-        # Cytoplasmic tdTomato: green-LED excited red emission, dense fill.
-        lambda_em_um=0.581, lambda_ex_um=0.555, scatter_length_um_wf=150.0,
-        sigma_abs=4.5e-16, phi=0.69, qe_det=0.8,
-        nuclear=False, dendflag=True, axonflag=True,
-        bg_scale=2.5, soma_gain=1.0, nuc_fl=0.0, gamma=None,
-        pavg=0.09, gain=0.04, oof_blur_um=12.0,
-        bias=470.0, dark_rate=0.3, read_noise=1.6,
-    ),
-    "bfp": dict(
-        # Nuclear-enriched BFP: violet-LED excited blue emission. Bright
-        # punctate nuclei (nuc_fl, heavy-tailed expression) over a dim
-        # cytoplasm/neuropil background (bg_scale, soma_gain).
-        lambda_em_um=0.457, lambda_ex_um=0.405, scatter_length_um_wf=55.0,
-        sigma_abs=2.5e-16, phi=0.55, qe_det=0.75,
-        nuclear=True, dendflag=True, axonflag=True,
-        bg_scale=1.0, soma_gain=1.0, nuc_fl=5.0, nuc_frac=0.5,
-        gamma=(0.5, 1.6),
-        pavg=0.5, gain=0.045, oof_blur_um=2.0,
-        bias=250.0, dark_rate=0.3, read_noise=1.6,
-    ),
-}
-# Match quality vs the real recordings (medium 1000 um FOV):
-#   tdt  5/5 summary stats in range (excellent) + the washed-cloud texture and
-#        intensity histogram both match.
-#   bfp  temporal_cv and p999 in range, median ~within 10%, and the intensity
-#        HISTOGRAM overlaps the real one across the full bright-nuclei tail. Two
-#        gaps remain, both rooted in Phase 1 (not the static trace / scan model):
-#          - spatial_cv (~0.55 vs 0.43): the MSN phase-1 gives ~6000 small
-#            (~5.5 um) nuclei, so even at nuc_frac=0.5 the labelled nuclei are
-#            denser and smaller than the real sparse, larger BFP+ nuclei. Denser
-#            small dots read as higher contrast.
-#          - floor_frac (~0.5 vs 0.13-0.30): the real mean image includes the
-#            dark window vignette and DARK BLOOD VESSELS punching the field; the
-#            striatum preset deliberately thins vessels (so they fade under the
-#            tdTomato wash) and this demo adds no vignette, so the sim floor
-#            cannot drop as low.
-#        Both need a phase-1 change (fewer/larger nuclei + visible vessels for a
-#        nuclear channel), tracked separately; the static-indicator machinery
-#        itself is validated by the tdt match.
-
-# Real-recording summary-stat targets (min, max) across the 4 real files.
-REAL_TARGETS = {
-    "tdt": dict(spatial_cv=(0.08, 0.11), temporal_cv=(0.08, 0.12),
-                median=(2260, 4000), floor_frac=(0.70, 0.82),
-                p999_over_med=(1.30, 1.70)),
-    "bfp": dict(spatial_cv=(0.35, 0.43), temporal_cv=(0.11, 0.14),
-                median=(1500, 1700), floor_frac=(0.13, 0.30),
-                p999_over_med=(5.00, 6.50)),
-}
 
 
 def parse_args():
@@ -251,37 +192,6 @@ def run_channel(channel, vol_out, vol_params, nt, seed, motion_model="physio"):
         return noisy.astype(np.float32), clean.astype(np.float32)
 
     return scan_out.mov, scan_out.mov_raw
-
-
-# ======================================================================
-# Stats + comparison
-# ======================================================================
-def summary_stats(mov):
-    """mov: (H,W,T). Summary matching the real-data analysis."""
-    mean_img = mov.mean(2)
-    std_t = mov.std(2)
-    bright = mean_img > np.percentile(mean_img, 50)
-    cv_t = float(np.median(std_t[bright] / (mean_img[bright] + 1e-6)))
-    p = np.percentile(mean_img, [1, 50, 90, 99, 99.9])
-    return dict(median=float(p[1]), mean=float(mean_img.mean()),
-                max=float(mean_img.max()),
-                spatial_cv=float(mean_img.std() / mean_img.mean()),
-                temporal_cv=cv_t, floor_frac=float(p[0] / (p[1] + 1e-9)),
-                p999_over_med=float(p[4] / (p[1] + 1e-9)),
-                pctiles=p.astype(int).tolist())
-
-
-def print_comparison(channel, mov):
-    st = summary_stats(mov)
-    tgt = REAL_TARGETS[channel]
-    print(f"\n  {channel.upper()} static widefield vs real striatum recordings")
-    print(f"    median={st['median']:.0f}  mean={st['mean']:.0f}  "
-          f"max={st['max']:.0f}  pctiles[1,50,90,99,99.9]={st['pctiles']}")
-    for key in ("spatial_cv", "temporal_cv", "median", "floor_frac",
-                "p999_over_med"):
-        lo, hi = tgt[key]
-        ok = "OK" if lo <= st[key] <= hi else "  "
-        print(f"    [{ok}] {key:16s}= {st[key]:9.3f}   real [{lo}, {hi}]")
 
 
 def real_mean_image(channel):

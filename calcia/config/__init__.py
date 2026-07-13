@@ -12,6 +12,7 @@ from .params import (
     SpikeParams,
     CalciumParams,
 )
+from .indicator_presets import STATIC_PRESETS, REAL_TARGETS
 
 __all__ = [
     "VolumeParams",
@@ -24,4 +25,7 @@ __all__ = [
     "TpmParams",
     "SpikeParams",
     "CalciumParams",
+    # Static-indicator presets (tdt / bfp)
+    "STATIC_PRESETS",
+    "REAL_TARGETS",
 ]
