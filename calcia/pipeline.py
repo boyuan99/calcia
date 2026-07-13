@@ -84,7 +84,7 @@ def simulate_neural_volume(
     psf_params: Optional[PsfParams] = None,
     *,
     seed: Optional[int] = None,
-    dendrite_strategy: str = "morphology",
+    dendrite_strategy: str = "space_colonization",
     verbose: Optional[int] = None,
 ) -> NeuralVolumeOutput:
     """Run the full Phase 1 neural volume simulation pipeline.
@@ -110,6 +110,12 @@ def simulate_neural_volume(
         psf_params: PSF parameters. Used to compute vasc_sz (the extended
             domain for blood vessel generation). Uses defaults if None.
         seed: Random seed for reproducibility. If None, no seed is set.
+        dendrite_strategy: Basal dendrite growth strategy. Default
+            'space_colonization' (competitive attractor branching, ~100-250x
+            faster than 'morphology' at scale; tune via DendParams sc_* params).
+            Use 'morphology' for the NAOMi-faithful two-level Dijkstra port
+            (REQUIRED when comparing against MATLAB reference output), or
+            'field' for a fast statistical neuropil-density cloud.
         verbose: Verbosity override (0=silent, 1=progress, 2=detailed).
             If None, uses vol_params.verbose.
 
