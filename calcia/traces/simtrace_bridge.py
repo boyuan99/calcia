@@ -224,6 +224,95 @@ def _trim_result_frames(out: TimeTracesResult, nt: int) -> TimeTracesResult:
 
 
 # ---------------------------------------------------------------------------
+# Current sim-trace API: ensemble-recruitment spike source
+# ---------------------------------------------------------------------------
+# sim-trace was refactored from the A-E ``IntensityModel`` taxonomy (the
+# ``model_factory`` helpers below, kept for reference) into a focused
+# ENSEMBLE-RECRUITMENT generator: each stimulus / self-initiated event recruits a
+# sub-population (an ensemble) of neurons, with a tunable overlap regime
+# (high / partial / low) between the ensembles of different conditions, plus
+# trial-to-trial participation noise. ``simtrace.ensemble.simulate_recruitment``
+# returns a ``K x nt`` spike-count matrix — exactly what calcia's ``s_times`` hook
+# wants. This is the supported bridge against the current sim-trace.
+
+
+def generate_time_traces_recruitment(
+    spike_params: SpikeParams,
+    cal_params: Optional[CalciumParams] = None,
+    n_locs: Optional[np.ndarray] = None,
+    *,
+    regime: str = "partial",
+    seed: Optional[int] = None,
+    n_conditions: int = 6,
+    ensemble_frac: float = 0.06,
+    iti_s: float = 1.0,
+    response_window_s: float = 0.6,
+    spontaneous_rate: float = 0.25,
+    evoked_rate: float = 8.0,
+    graded: bool = True,
+    verbose: Optional[int] = None,
+):
+    """End-to-end: sim-trace ENSEMBLE-RECRUITMENT spikes -> calcia calcium ODE.
+
+    Drop-in alternative to :func:`calcia.generate_time_traces` where the spike
+    trains come from ``simtrace.ensemble.simulate_recruitment`` — a coupling
+    design in which each trial recruits a spatially-scattered ENSEMBLE of the
+    ``K`` fluorescent components, so the movie shows correlated up-events across a
+    genetically-/functionally-defined sub-population instead of calcia's built-in
+    independent burst-Poisson / spatial Hawkes. The ``overlap regime`` controls
+    how much successive ensembles share members.
+
+    The default recruitment parameters here are tuned for calcia's SHORT internal
+    window (a ~10 s movie == 1000 samples at 100 Hz), unlike sim-trace's own
+    10-minute-session defaults: short ITIs and a handful of trials so several
+    distinct ensembles activate within the clip.
+
+    Returns ``(TimeTracesResult, RecruitmentSession)`` — the session carries the
+    ground-truth ``membership`` (n_conditions x K ensembles) and ``recruited``
+    matrices for downstream scoring.
+    """
+    from simtrace.ensemble import RecruitmentParams, simulate_recruitment
+
+    K = spike_params.K
+    nt_int = _nt_internal(spike_params)
+    fps = _SPIKE_HZ                       # recruitment runs at calcia's 100 Hz
+    duration_s = nt_int / fps
+    n_trials = max(n_conditions, int(duration_s / max(iti_s, 1e-3)))
+
+    xy = None
+    if n_locs is not None and np.asarray(n_locs).shape[0] == K:
+        xy = np.asarray(n_locs)[:, :2].astype(float)
+    ensemble_size = max(1, int(round(ensemble_frac * K)))
+
+    rp = RecruitmentParams(
+        K=K, n_conditions=n_conditions, ensemble_size=ensemble_size,
+        n_trials=n_trials, duration_s=duration_s, frame_rate_hz=fps,
+        iti_s=iti_s, response_window_s=response_window_s,
+        spontaneous_rate=spontaneous_rate, evoked_rate=evoked_rate,
+        graded=graded, seed=(seed if seed is not None else 0), xy=xy,
+    )
+    session = simulate_recruitment(regime, rp)
+
+    spikes = np.asarray(session.spikes, dtype=np.float32)   # K x nt (counts)
+    if spikes.shape[1] > nt_int:
+        spikes = spikes[:, :nt_int]
+    elif spikes.shape[1] < nt_int:
+        spikes = np.concatenate(
+            [spikes, np.zeros((K, nt_int - spikes.shape[1]), np.float32)], axis=1)
+
+    out = generate_time_traces(
+        spike_params=spike_params, cal_params=cal_params,
+        s_times=spikes, n_locs=n_locs, verbose=verbose,
+    )
+    return _trim_result_frames(out, spike_params.nt), session
+
+
+# ---------------------------------------------------------------------------
+# LEGACY (A-E IntensityModel taxonomy) — for reference only. These require the
+# OLD sim-trace layout (simtrace.sampling / simtrace.models / simtrace.core),
+# which the current ensemble-focused sim-trace no longer ships. Use
+# generate_time_traces_recruitment above with the installed sim-trace.
+# ---------------------------------------------------------------------------
 # Ready-made sim-trace coupling designs (factories sized to K at call time)
 # ---------------------------------------------------------------------------
 
