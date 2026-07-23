@@ -102,7 +102,7 @@ def parse_args():
     p.add_argument("--no-save", action="store_true")
     p.add_argument("--no-viz", action="store_true",
                    help="Skip building the viz_cache bundle (faster). Backfill "
-                        "later with: python examples/rebuild_viz.py <run_dir>")
+                        "later with: python examples/archive/rebuild_viz.py <run_dir>")
     p.add_argument("--profile", action="store_true",
                    help="Profile the run with pyinstrument (saves profile.html + "
                         "prints a runtime breakdown).")

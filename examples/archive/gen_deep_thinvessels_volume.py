@@ -24,6 +24,8 @@ from pyinstrument import Profiler
 
 _profiler = Profiler(); _profiler.start()
 
+# archived: add examples/ (parent dir) so the sibling import resolves
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import _striatum_common as _C
 _C.tee_stdout(os.path.splitext(os.path.basename(__file__))[0])
 
