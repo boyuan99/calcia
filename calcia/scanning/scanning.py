@@ -56,6 +56,13 @@ class ScanResult:
         first frame, streaks below ``MotionParams.blur_min_px``, or when blur is
         off). Only produced by the widefield ``physio`` motion model; ``None``
         for the legacy random walk / two-photon path.
+    motion_gt : dict, optional
+        Complete, lossless record of every motion component actually rendered
+        into the movie. ``mot_hist`` and ``blur_hist`` are lossy summaries kept
+        for backward compatibility; this is the full truth (sub-voxel rounding
+        residual, un-thresholded and clamp-corrected blur streaks, per-row scan
+        shear). See :func:`calcia.scanning.motion.describe_motion_gt` for the
+        key list and units. Produced by both scanners.
     """
     mov: np.ndarray
     mov_raw: np.ndarray
@@ -64,6 +71,7 @@ class ScanResult:
     mov_infocus: Optional[np.ndarray] = None
     mov_oof: Optional[np.ndarray] = None
     blur_hist: Optional[np.ndarray] = None
+    motion_gt: Optional[Dict[str, np.ndarray]] = None
 
 
 def scan_volume(
@@ -414,6 +422,14 @@ def scan_volume(
     mov = np.zeros((out_h, out_w, Nt), dtype=np.float32)
     mov_raw = np.zeros((out_h, out_w, Nt), dtype=np.float32)
     mot_hist = np.zeros((3, Nt), dtype=np.float32)
+    # Complete motion record (see motion.describe_motion_gt). mot_hist collapses
+    # the raster to a single y_pos per frame; the per-ROW offsets below are the
+    # intra-frame scan distortion it discards.
+    _mgt = dict(
+        shift_applied=np.zeros((3, Nt), dtype=np.float32),
+        row_y_off=np.zeros((N1, Nt), dtype=np.float32),
+        row_shear=np.zeros((N1, Nt), dtype=np.float32),
+    )
     mov_infocus = (np.zeros((out_h, out_w, Nt), dtype=np.float32)
                    if separate_focus else None)
     mov_oof = (np.zeros((out_h, out_w, Nt), dtype=np.float32)
@@ -487,6 +503,10 @@ def scan_volume(
             1, 2 * scan_buff + 1,
         )
         y_off = np.round(y_off).astype(np.float64)
+
+        _mgt["shift_applied"][:, kk] = [x_pos, y_pos, z_loc]
+        _mgt["row_y_off"][:, kk] = y_off
+        _mgt["row_shear"][:, kk] = y_shr
 
         # --- Build temporary volume ---
         tmp_vol = np.zeros((N1, N2, N3), dtype=np.float32)
@@ -604,6 +624,13 @@ def scan_volume(
         },
         mov_infocus=mov_infocus,
         mov_oof=mov_oof,
+        motion_gt=dict(
+            _mgt,
+            model=np.array("twophoton"),
+            sfrac=np.float32(sfrac),
+            scan_buff=np.int32(scan_buff),
+            motion_enabled=np.bool_(bool(mot_opt)),
+        ),
     )
 
 

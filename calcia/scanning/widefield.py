@@ -28,7 +28,8 @@ from scipy.signal import convolve2d
 from ..config.params import CameraNoiseParams, MotionParams, ScanParams, WidefieldParams
 from ..optics.signal import widefield_signal_scale
 from .convolution import psf_fft, single_scan
-from .motion import apply_motion_blur, generate_motion_trajectory
+from .motion import (apply_motion_blur, generate_motion_trajectory,
+                     resolve_streak)
 from .noise import camera_noise
 from .scanning import ScanResult, _idx_to_2d
 
@@ -360,6 +361,17 @@ def scan_widefield(
     # only). Records the displacement actually smeared into each frame; 0 for
     # frames where no blur was applied. Ground truth for de-blur / registration.
     blur_hist = (np.zeros((2, Nt), dtype=np.float32) if use_physio else None)
+    # Complete, unreduced motion record (see motion.describe_motion_gt). Unlike
+    # mot_hist/blur_hist this keeps the parts the rendering pipeline discards:
+    # the sub-voxel rounding residual and the threshold/clamp-corrected streak.
+    _mgt = dict(
+        shift_requested=np.zeros((2, Nt), dtype=np.float32),
+        shift_applied=np.zeros((2, Nt), dtype=np.float32),
+        blur_requested=np.zeros((2, Nt), dtype=np.float32),
+        blur_applied=np.zeros((2, Nt), dtype=np.float32),
+        blur_skipped=np.zeros(Nt, dtype=bool),
+        blur_clipped=np.zeros(Nt, dtype=bool),
+    )
     mov_infocus = (np.zeros((out_h, out_w, Nt), dtype=np.float32)
                    if separate_focus else None)
     mov_oof = (np.zeros((out_h, out_w, Nt), dtype=np.float32)
@@ -401,9 +413,17 @@ def scan_widefield(
             if kk > 0:
                 blur_dx = (xf - float(physio_traj[kk - 1, 0]))
                 blur_dy = (yf - float(physio_traj[kk - 1, 1]))
+                # The sample travelled this far during the exposure whether or
+                # not the blur stage is enabled -- record it unconditionally.
+                _mgt["blur_requested"][:, kk] = [
+                    blur_dx * motion_params.exposure_frac,
+                    blur_dy * motion_params.exposure_frac]
             x_shift = int(round(xf))
             y_shift = int(round(yf))
             mot_hist[:, kk] = [xf, yf, 0]
+            # mot_hist keeps the float request, but the pixels move by the
+            # ROUNDED shift -- record both so the <=0.5 voxel residual survives.
+            _mgt["shift_requested"][:, kk] = [xf, yf]
         else:
             # legacy bounded +/-1 voxel Brownian walk
             x_shift = int(np.clip(x_shift + rng.choice(xy_step),
@@ -411,6 +431,9 @@ def scan_widefield(
             y_shift = int(np.clip(y_shift + rng.choice(xy_step),
                                   -scan_buff, scan_buff))
             mot_hist[:, kk] = [x_shift, y_shift, 0]
+            # Integer walk: request and application coincide exactly.
+            _mgt["shift_requested"][:, kk] = [x_shift, y_shift]
+        _mgt["shift_applied"][:, kk] = [x_shift, y_shift]
 
         # --- Build transient activity volume ---
         tmp_vol = np.zeros((N1, N2, N3), dtype=np.float32)
@@ -472,6 +495,13 @@ def scan_widefield(
             # below _mn, where apply_motion_blur is a no-op) as ground truth.
             if np.hypot(bx, by) >= _mn:
                 blur_hist[:, kk] = [bx, by]
+            # blur_hist stores the UN-clamped request; motion_gt keeps both the
+            # request and what motion_streak_kernel actually renders.
+            _ax, _ay, _skip, _clip = resolve_streak(bx, by, max_len=_mx,
+                                                    min_len=_mn)
+            _mgt["blur_applied"][:, kk] = [_ax, _ay]
+            _mgt["blur_skipped"][kk] = _skip
+            _mgt["blur_clipped"][kk] = _clip
             clean_img = apply_motion_blur(clean_img, bx, by,
                                           max_len=_mx, min_len=_mn)
             if separate_focus:
@@ -510,9 +540,20 @@ def scan_widefield(
         "wf_params": wf_params,
         "motion_params": motion_params,
     }
+    _mgt["shift_residual"] = (_mgt["shift_requested"]
+                              - _mgt["shift_applied"]).astype(np.float32)
+    _mgt.update(
+        model=np.array("physio" if use_physio else "randomwalk"),
+        sfrac=np.float32(sfrac),
+        vres=np.float32(vres if use_physio else np.nan),
+        scan_buff=np.int32(scan_buff),
+        blur_enabled=np.bool_(bool(use_physio and motion_params.blur)),
+        exposure_frac=np.float32(motion_params.exposure_frac
+                                 if use_physio else np.nan),
+    )
     return ScanResult(mov=mov, mov_raw=mov_raw, mot_hist=mot_hist, params=params,
                       mov_infocus=mov_infocus, mov_oof=mov_oof,
-                      blur_hist=blur_hist)
+                      blur_hist=blur_hist, motion_gt=_mgt)
 
 
 def _rigid_shift_and_crop(

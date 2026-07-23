@@ -392,6 +392,43 @@ class TestScanVolumeIntegration:
         assert result.mot_hist.shape == (3, Nt)
         assert result.mov.dtype == np.float32
 
+    def test_motion_gt_keeps_per_row_shear(self, synthetic_inputs):
+        """mot_hist collapses the raster to one y_pos/frame; motion_gt keeps the
+        per-row offsets that apply_row_shifts actually used."""
+        from calcia.scanning import scan_volume
+
+        vol_out, opt_out, time_out, spike_params = synthetic_inputs
+        scan_params = ScanParams(scan_buff=3, motion=True, sfrac=2, verbose=0)
+        r = scan_volume(vol_out, opt_out, time_out, scan_params=scan_params,
+                        spike_params=spike_params, seed=42)
+        g = r.motion_gt
+        N1, Nt = 30, 5
+        assert g is not None and str(g["model"]) == "twophoton"
+        assert g["row_y_off"].shape == (N1, Nt)
+        np.testing.assert_array_equal(g["shift_applied"], r.mot_hist)
+        # Rows within a frame really do differ -- that spread is the intra-frame
+        # distortion mot_hist's scalar y_pos discards.
+        assert g["row_y_off"].std(axis=0).max() > 0
+        assert np.abs(g["row_shear"]).max() > 0
+        # Offsets are integers within the crop margin, as apply_row_shifts needs.
+        np.testing.assert_array_equal(g["row_y_off"],
+                                      np.round(g["row_y_off"]))
+        assert g["row_y_off"].min() >= 1
+        assert g["row_y_off"].max() <= 2 * 3 + 1
+
+    def test_motion_gt_static_when_motion_off(self, synthetic_inputs):
+        """motion=False: no shear, no per-row spread."""
+        from calcia.scanning import scan_volume
+
+        vol_out, opt_out, time_out, spike_params = synthetic_inputs
+        scan_params = ScanParams(scan_buff=3, motion=False, sfrac=2, verbose=0)
+        r = scan_volume(vol_out, opt_out, time_out, scan_params=scan_params,
+                        spike_params=spike_params, seed=42)
+        g = r.motion_gt
+        assert not bool(g["motion_enabled"])
+        assert np.all(g["row_shear"] == 0)
+        assert np.all(g["row_y_off"].std(axis=0) == 0)
+
     def test_deterministic_with_seed(self, synthetic_inputs):
         from calcia.scanning import scan_volume
 

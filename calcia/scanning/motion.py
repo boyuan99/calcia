@@ -125,6 +125,127 @@ def apply_motion_blur(
     return convolve(img.astype(np.float32), ker, mode="nearest").astype(np.float32)
 
 
+def resolve_streak(
+    dx: float,
+    dy: float,
+    max_len: float = 40.0,
+    min_len: float = 0.75,
+) -> Tuple[float, float, bool, bool]:
+    """Resolve a requested streak into the one :func:`apply_motion_blur` renders.
+
+    :func:`motion_streak_kernel` silently drops streaks shorter than ``min_len``
+    and clamps ones longer than ``max_len``, so the requested ``(dx, dy)`` is
+    NOT in general what ends up smeared into the frame. This returns the streak
+    that actually gets rendered, so ground truth can record it exactly.
+
+    Returns
+    -------
+    (ax, ay, skipped, clipped)
+        ``ax, ay`` is the rendered streak (``0, 0`` when skipped); ``skipped``
+        is True when the streak fell below ``min_len``; ``clipped`` is True when
+        it was shortened to ``max_len`` (direction preserved).
+    """
+    L = float(np.hypot(dx, dy))
+    if L < float(min_len):
+        return 0.0, 0.0, True, False
+    if L > float(max_len):
+        s = float(max_len) / L
+        return dx * s, dy * s, False, True
+    return float(dx), float(dy), False, False
+
+
+def describe_motion_gt() -> str:
+    """Human-readable key list for :attr:`ScanResult.motion_gt`.
+
+    ``motion_gt`` is the complete, unreduced record of the motion rendered into
+    a movie -- nothing thresholded away, nothing rounded off. All displacements
+    are in **full-resolution voxels**; divide by ``sfrac`` for movie pixels, and
+    by ``vres`` for microns.
+
+    Common to both scanners::
+
+        model            'physio' | 'randomwalk' | 'twophoton'
+        sfrac            voxels per movie pixel (movie_px = voxels / sfrac)
+        vres             voxels per micron
+        scan_buff        crop margin, voxels
+
+    Widefield::
+
+        shift_requested  (2, Nt) float trajectory the model asked for
+        shift_applied    (2, Nt) integer shift actually applied to the pixels
+        shift_residual   (2, Nt) requested - applied; the <=0.5 voxel sub-voxel
+                         error NO registration can recover from mot_hist alone
+        blur_requested   (2, Nt) intra-frame streak before threshold/clamp
+        blur_applied     (2, Nt) streak actually convolved into the frame
+        blur_skipped     (Nt,) bool, streak fell below blur_min_px
+        blur_clipped     (Nt,) bool, streak was clamped to blur_max_px
+        blur_enabled     bool, whether the blur stage ran at all
+        exposure_frac    duty cycle used to scale velocity -> streak
+
+    Two-photon (raster)::
+
+        shift_applied    (3, Nt) per-frame [x_pos, y_pos, z_loc]
+        row_y_off        (N1, Nt) per-ROW y offset actually applied by
+                         apply_row_shifts -- the intra-frame scan distortion
+                         that mot_hist's scalar y_pos throws away
+        row_shear        (N1, Nt) the smooth shear-ramp component of row_y_off
+    """
+    return describe_motion_gt.__doc__ or ""
+
+
+def load_motion_gt(source) -> dict:
+    """Load the AUTHORITATIVE motion ground truth for a saved run.
+
+    ``motion_gt`` is the DEFAULT motion artifact — prefer this over reading
+    ``mot_hist`` directly, which is a lossy summary (see
+    :func:`describe_motion_gt`).
+
+    Parameters
+    ----------
+    source:
+        A run directory, a path to its ``movies.npz``, or an already-loaded
+        npz/mapping.
+
+    Returns
+    -------
+    dict
+        The ``motion_gt`` components with their ``mgt_`` storage prefix stripped.
+        Scalars stored as 0-d arrays are unwrapped. ``legacy`` is True when the
+        run predates ``motion_gt`` and the dict was reconstructed from
+        ``mot_hist``/``blur_hist`` alone (sub-voxel residual, clamp corrections
+        and per-row shear are then NOT recoverable).
+    """
+    import os
+
+    if isinstance(source, (str, os.PathLike)):
+        p = os.fspath(source)
+        if os.path.isdir(p):
+            p = os.path.join(p, "movies.npz")
+        data = np.load(p, allow_pickle=True)
+    else:
+        data = source                      # npz handle or mapping
+
+    keys = list(getattr(data, "files", None) or data.keys())
+
+    def _get(k):
+        v = data[k]
+        # 0-d arrays hold scalars/strings written by np.savez
+        return v.item() if getattr(v, "ndim", None) == 0 else v
+
+    gt = {k[len("mgt_"):]: _get(k) for k in keys if k.startswith("mgt_")}
+    if gt:
+        gt["legacy"] = False
+        return gt
+
+    # Pre-motion_gt run: reconstruct what little mot_hist/blur_hist preserve.
+    gt = {"legacy": True}
+    if "mot_hist" in keys:
+        gt["shift_applied"] = data["mot_hist"]
+    if "blur_hist" in keys:
+        gt["blur_requested"] = data["blur_hist"]
+    return gt
+
+
 def apply_row_shifts(
     img: np.ndarray,
     buf_sz: int,

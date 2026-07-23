@@ -57,6 +57,10 @@ def save_full_bundle(run_dir, *, noisy, clean, vol_out, vol_params, opt_out,
             movies["mot_hist"] = scan_out.mot_hist
         if getattr(scan_out, "blur_hist", None) is not None:
             movies["blur_hist"] = scan_out.blur_hist
+        # Complete motion ground truth, one array per component, `mgt_`-prefixed
+        # so it round-trips through npz alongside the lossy mot_hist/blur_hist.
+        for k, v in (getattr(scan_out, "motion_gt", None) or {}).items():
+            movies[f"mgt_{k}"] = v
         np.savez_compressed(os.path.join(run_dir, "movies.npz"), **movies)
     _step("movies.npz", _save_movies, critical=True)
 

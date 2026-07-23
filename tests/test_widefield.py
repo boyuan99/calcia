@@ -784,6 +784,112 @@ class TestScanWidefield:
         # motion_params round-trips through the result params dict
         assert r.params["motion_params"] is mp
 
+    def test_motion_gt_is_lossless(self, synthetic_inputs):
+        """motion_gt records what mot_hist/blur_hist round off or threshold away.
+
+        Three components must survive: the sub-voxel rounding residual, the
+        streak on frames below blur_min_px, and the clamp on long streaks.
+        """
+        from calcia.scanning import scan_widefield
+        from calcia.config.params import MotionParams
+        vol_out, opt_out, time_out, spike_params = synthetic_inputs
+        sfrac = 2
+        sp = ScanParams(scan_buff=8, motion=True, sfrac=sfrac, verbose=0)
+        mp = MotionParams(model="physio", seed=5)
+        r = scan_widefield(vol_out, opt_out, time_out, scan_params=sp,
+                           spike_params=spike_params, motion_params=mp, seed=1)
+        g = r.motion_gt
+        Nt = time_out.soma.shape[1]
+        assert g is not None and str(g["model"]) == "physio"
+
+        # (1) The request is mot_hist; the pixels moved by the ROUNDED shift.
+        np.testing.assert_allclose(g["shift_requested"], r.mot_hist[:2],
+                                   atol=1e-5)
+        np.testing.assert_allclose(g["shift_applied"],
+                                   np.round(r.mot_hist[:2]), atol=1e-5)
+        np.testing.assert_allclose(
+            g["shift_residual"], g["shift_requested"] - g["shift_applied"],
+            atol=1e-6)
+        assert np.all(np.abs(g["shift_residual"]) <= 0.5 + 1e-5)
+        # The residual is real, not a formality: some frame is off-grid.
+        assert np.abs(g["shift_residual"]).max() > 1e-3
+
+        # (2) blur_requested keeps every frame's intra-frame travel, including
+        #     the sub-threshold frames blur_hist zeroes out.
+        step = np.diff(r.mot_hist[:2], axis=1) * mp.exposure_frac
+        exp_req = np.zeros((2, Nt), dtype=np.float32)
+        exp_req[:, 1:] = step
+        np.testing.assert_allclose(g["blur_requested"], exp_req, atol=1e-5)
+        skipped = g["blur_skipped"]
+        assert np.all(g["blur_applied"][:, skipped] == 0)
+
+        # (3) blur_applied equals the streak the kernel actually renders, i.e.
+        #     direction preserved, length clamped to blur_max_px.
+        _mx = mp.blur_max_px * sfrac
+        L_req = np.hypot(*g["blur_requested"])
+        L_app = np.hypot(*g["blur_applied"])
+        np.testing.assert_allclose(L_app[~skipped],
+                                   np.minimum(L_req[~skipped], _mx), atol=1e-4)
+        np.testing.assert_array_equal(g["blur_clipped"], L_req > _mx + 1e-9)
+        ok = (~skipped) & (L_req > 0)
+        np.testing.assert_allclose(
+            g["blur_applied"][:, ok] / L_app[ok],
+            g["blur_requested"][:, ok] / L_req[ok], atol=1e-4)
+
+    def test_motion_gt_streak_clamp_is_recorded(self, synthetic_inputs):
+        """When the clamp fires, blur_hist over-reports and motion_gt does not."""
+        from calcia.scanning import scan_widefield
+        from calcia.config.params import MotionParams
+        vol_out, opt_out, time_out, spike_params = synthetic_inputs
+        sfrac = 2
+        sp = ScanParams(scan_buff=8, motion=True, sfrac=sfrac, verbose=0)
+        # blur_max_px small enough that ordinary jitter exceeds it.
+        mp = MotionParams(model="physio", seed=5, blur_max_px=0.5,
+                          blur_min_px=0.1)
+        r = scan_widefield(vol_out, opt_out, time_out, scan_params=sp,
+                           spike_params=spike_params, motion_params=mp, seed=1)
+        g = r.motion_gt
+        assert g["blur_clipped"].any()
+        clipped = g["blur_clipped"]
+        # blur_hist keeps the un-clamped request (longer than what was drawn)...
+        assert np.all(np.hypot(*r.blur_hist[:, clipped])
+                      > mp.blur_max_px * sfrac)
+        # ...motion_gt keeps the length actually smeared into the frame.
+        np.testing.assert_allclose(np.hypot(*g["blur_applied"][:, clipped]),
+                                   mp.blur_max_px * sfrac, atol=1e-4)
+
+    def test_motion_gt_keeps_subthreshold_travel(self, synthetic_inputs):
+        """Frames below blur_min_px moved, but blur_hist reports them as zero."""
+        from calcia.scanning import scan_widefield
+        from calcia.config.params import MotionParams
+        vol_out, opt_out, time_out, spike_params = synthetic_inputs
+        sp = ScanParams(scan_buff=8, motion=True, sfrac=2, verbose=0)
+        # min_len high enough that every streak is dropped by the blur stage.
+        mp = MotionParams(model="physio", seed=5, blur_min_px=1e4)
+        r = scan_widefield(vol_out, opt_out, time_out, scan_params=sp,
+                           spike_params=spike_params, motion_params=mp, seed=1)
+        g = r.motion_gt
+        assert np.all(g["blur_skipped"][1:])
+        assert np.all(r.blur_hist == 0)             # lossy: reads as "no motion"
+        assert np.all(g["blur_applied"] == 0)       # correct: nothing was drawn
+        # ...but the sample really did travel, and motion_gt still knows it.
+        assert np.abs(g["blur_requested"][:, 1:]).max() > 0
+
+    def test_motion_gt_randomwalk_exact(self, synthetic_inputs):
+        """Integer walk: request == applied, zero residual, blur stage off."""
+        from calcia.scanning import scan_widefield
+        from calcia.config.params import MotionParams
+        vol_out, opt_out, time_out, spike_params = synthetic_inputs
+        sp = ScanParams(scan_buff=4, motion=True, sfrac=2, verbose=0)
+        r = scan_widefield(vol_out, opt_out, time_out, scan_params=sp,
+                           spike_params=spike_params,
+                           motion_params=MotionParams(model="randomwalk"), seed=3)
+        g = r.motion_gt
+        assert str(g["model"]) == "randomwalk"
+        assert not bool(g["blur_enabled"])
+        np.testing.assert_array_equal(g["shift_applied"], r.mot_hist[:2])
+        assert np.all(g["shift_residual"] == 0)
+
     def test_randomwalk_has_no_blur_hist(self, synthetic_inputs):
         """The legacy walk has no intra-frame blur, so blur_hist is None."""
         from calcia.scanning import scan_widefield

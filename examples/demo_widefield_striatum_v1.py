@@ -743,6 +743,11 @@ def main():
         # (2, T) per-frame intra-frame motion-blur streak [dx, dy] in voxels
         # (physio motion only). Ground truth for de-blur / registration.
         movies["blur_hist"] = scan_out.blur_hist
+    # Complete motion ground truth (see motion.describe_motion_gt): keeps the
+    # sub-voxel rounding residual and the clamp-corrected streaks that the two
+    # summaries above drop.
+    for _k, _v in (getattr(scan_out, "motion_gt", None) or {}).items():
+        movies[f"mgt_{_k}"] = _v
     np.savez_compressed(os.path.join(run_dir, "movies.npz"), **movies)
     print(f"  saved movies.npz   mov_noisy {movies['mov_noisy'].shape} (T,H,W)")
 
