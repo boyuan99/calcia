@@ -131,9 +131,12 @@ def scan_widefield(
         )
 
     # ------------------------------------------------------------------
-    # In-focus slab (only needed when separate_focus=True). The emission PSF
-    # is sharpest at its array center, which single_scan aligns 1:1 with the
-    # volume z-axis, so the focal plane sits at the volume z-midpoint N3//2.
+    # In-focus slab (only needed when separate_focus=True). single_scan aligns
+    # PSF z-slice k 1:1 with volume z-plane k, so the slab must be centred on
+    # whichever plane the emission PSF is sharpest at. That is the array centre
+    # ONLY on the legacy path; when PsfParams.wf_focal_depth_um is set,
+    # simulate_optical_propagation slices a double-height PSF so the sharp
+    # slice lands at k_focus = round(wf_focal_depth_um * vres) instead.
     # ------------------------------------------------------------------
     zmask_in = None
     if separate_focus:
@@ -145,13 +148,21 @@ def scan_widefield(
             n = getattr(psf_params, "n", 1.33) or 1.33
             lam = getattr(psf_params, "lambda_em_um", 0.52) or 0.52
             focus_slab_um = 2.0 * n * lam / (na ** 2)
-        z_focus = N3 // 2
+        focal_um = getattr(psf_params, "wf_focal_depth_um", None)
+        if focal_um is None:
+            z_focus = N3 // 2                       # legacy: sharp at mid-depth
+        else:
+            z_focus = int(round(min(max(float(focal_um), 0.0),
+                                    (N3 - 1) / vres) * vres))
         slab_half = int(round(0.5 * float(focus_slab_um) * vres))
         z_idx = np.arange(N3)
-        zmask_in = (np.abs(z_idx - z_focus) <= slab_half).astype(np.float32)
+        zmask_in = (np.abs(z_idx - z_focus) <= slab_half)
         if verbose >= 1:
+            depth_note = ("mid-depth" if focal_um is None
+                          else f"focal_depth={float(focal_um):.0f} um")
             print(f"    - In-focus slab: z={z_focus}+/-{slab_half} voxels "
-                  f"({focus_slab_um:.1f} um, {int(zmask_in.sum())}/{N3} planes)")
+                  f"({focus_slab_um:.1f} um, {int(zmask_in.sum())}/{N3} planes, "
+                  f"{depth_note})")
 
     # ------------------------------------------------------------------
     # Combined lateral mask (uniform illumination * collection)
@@ -472,14 +483,17 @@ def scan_widefield(
 
         # --- Full-volume widefield convolution (sum over all z) ---
         scan_vol = tmp_vol + f0vol
-        clean_img = sigscale * single_scan(scan_vol, PSF.shape, freq_psf, 1)
-
-        # In-focus / out-of-focus split (opt-in; +1 convolution, exact by
-        # linearity since single_scan sums over z).
         if separate_focus:
-            vol_in = scan_vol * zmask_in[np.newaxis, np.newaxis, :]
-            infocus_img = sigscale * single_scan(vol_in, PSF.shape, freq_psf, 1)
+            # Partition the depth sum inside the transform: the per-z products
+            # are already there, so the split costs one extra 2-D inverse FFT
+            # rather than a second full scan. Exact by linearity.
+            all_img, in_img = single_scan(scan_vol, PSF.shape, freq_psf, 1,
+                                          z_groups=(slice(None), zmask_in))
+            clean_img = sigscale * all_img
+            infocus_img = sigscale * in_img
             oof_img = clean_img - infocus_img
+        else:
+            clean_img = sigscale * single_scan(scan_vol, PSF.shape, freq_psf, 1)
 
         # --- Intra-frame motion blur (physio model): the sample moves DURING
         # the exposure, so a fast frame is smeared along the motion direction.

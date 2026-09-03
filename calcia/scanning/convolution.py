@@ -96,11 +96,22 @@ def psf_fft(
 # Single-frame scan (3-D → 2-D via PSF convolution)
 # ------------------------------------------------------------------
 
+def _selects_all_z(g, nz: int) -> bool:
+    """True if the z-selector *g* keeps every one of *nz* planes."""
+    if isinstance(g, slice):
+        return g.indices(nz) == (0, nz, 1)
+    arr = np.asarray(g)
+    if arr.dtype == bool:
+        return bool(arr.all())
+    return arr.size == nz and np.array_equal(np.sort(arr.ravel()),
+                                             np.arange(nz))
+
 def single_scan(
     vol: np.ndarray,
     psf_shape: Tuple[int, int, int],
     freq_psf: np.ndarray,
     z_sub: int = 1,
+    z_groups: Optional[Sequence[np.ndarray]] = None,
 ) -> np.ndarray:
     """Convolve a 3-D volume with a PSF in the Fourier domain, producing a 2-D image.
 
@@ -118,12 +129,27 @@ def single_scan(
     z_sub : int
         Axial pre-summing factor (must match the value used in
         :func:`psf_fft`).
+    z_groups : sequence of boolean/index arrays over z, optional
+        Split the depth sum into several partial sums instead of one. The
+        per-z convolution products already exist in the Fourier domain, so
+        each additional group costs only ONE more 2-D inverse FFT — not
+        another forward transform. Use this instead of re-scanning a
+        z-masked volume (which costs a whole extra scan) when you need e.g.
+        an in-focus / out-of-focus decomposition. Not supported with
+        ``z_sub > 1``, where pre-summing has already merged adjacent planes.
 
     Returns
     -------
-    scan_img : np.ndarray
-        2-D float32 scanned image.
+    scan_img : np.ndarray or tuple of np.ndarray
+        2-D float32 scanned image; a tuple of them, in group order, when
+        *z_groups* is given.
     """
+    if z_groups is not None and z_sub > 1:
+        raise ValueError(
+            "z_groups is incompatible with z_sub > 1: pre-summing merges "
+            "adjacent z-planes, so group boundaries would be ambiguous."
+        )
+
     if z_sub > 1:
         vol_sub = _presub_z(vol, z_sub)
     else:
@@ -135,11 +161,29 @@ def single_scan(
     # Multi-threaded (workers=-1): the 2-D FFT batches over the z-axis, so it
     # parallelises across cores — this is the Phase-4 bottleneck on many-core
     # machines where numpy's single-threaded FFT wastes most of the CPU.
+    # The sum over z happens HERE, in the Fourier domain, before the single
+    # inverse transform — which is why a partial depth sum only needs another
+    # ifft2 (see z_groups), not another forward pass.
     freq_vol = _spfft.fft2(vol_sub, s=fft_shape, axes=(0, 1), workers=-1)
-    scan_full = _spfft.ifft2(
-        np.sum(freq_vol * freq_psf, axis=2),
-        axes=(0, 1), workers=-1,
-    ).real
+    freq_vol *= freq_psf        # per-z convolution products, in place
+
+    if z_groups is None:
+        partials = (np.sum(freq_vol, axis=2),)
+    else:
+        # A group covering every plane reuses the full sum: same value, and
+        # bit-identical to the un-split scan (boolean indexing would re-block
+        # the reduction and shift the last ulp).
+        nz = freq_vol.shape[2]
+        full = None
+        parts = []
+        for g in z_groups:
+            if _selects_all_z(g, nz):
+                if full is None:
+                    full = np.sum(freq_vol, axis=2)
+                parts.append(full)
+            else:
+                parts.append(np.sum(freq_vol[:, :, g], axis=2))
+        partials = tuple(parts)
 
     # Crop to valid convolution region (matching MATLAB cropping)
     # MATLAB: y_ix = ceil((psf_sz(1)-1)/2) + [1, size(vol_sub,1)]
@@ -152,10 +196,15 @@ def single_scan(
 
     row_off = int(np.ceil((psf_shape_sub[0] - 1) / 2))
     col_off = int(np.ceil((psf_shape_sub[1] - 1) / 2))
-    scan_img = scan_full[row_off:row_off + vol_sub.shape[0],
-                         col_off:col_off + vol_sub.shape[1]]
 
-    return scan_img.astype(np.float32)
+    imgs = []
+    for part in partials:
+        scan_full = _spfft.ifft2(part, axes=(0, 1), workers=-1).real
+        imgs.append(scan_full[row_off:row_off + vol_sub.shape[0],
+                              col_off:col_off + vol_sub.shape[1]]
+                    .astype(np.float32))
+
+    return imgs[0] if z_groups is None else tuple(imgs)
 
 
 # ------------------------------------------------------------------
