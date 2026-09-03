@@ -17,6 +17,7 @@ from .dendrites import (
     grow_neuron_dendrites,
     grow_apical_dendrites,
     DendriteResult,
+    DendriteGrowthGraph,
     ApicalDendriteResult,
 )
 
@@ -63,6 +64,7 @@ __all__ = [
     "grow_neuron_dendrites",
     "grow_apical_dendrites",
     "DendriteResult",
+    "DendriteGrowthGraph",
     "ApicalDendriteResult",
     # Fluorescence
     "set_cell_fluorescence",

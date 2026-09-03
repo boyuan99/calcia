@@ -22,6 +22,47 @@ from .neural_volume import NeuralVolumeResult
 
 
 @dataclass
+class DendriteGrowthGraph:
+    """The dendrite tree *before* it is rasterized into voxels.
+
+    Space colonization builds an explicit node/parent forest and then throws it
+    away once the branches are splatted into ``neur_num``. This container keeps
+    it, which is what lets a caller replay the growth (visualization, morphology
+    statistics, SWC-style export) instead of only seeing the final voxel mask.
+    It is populated only when ``capture_growth=True`` -- growth is unaffected.
+
+    Nodes are created parent-before-child, so ``node_parent[i] < i`` always
+    holds: array order IS a valid topological growth order, and any prefix
+    ``[:k]`` is a connected forest.
+
+    Attributes:
+        node_pos: (M, 3) float64 node coordinates in FULL-RESOLUTION VOXELS
+                  (i.e. micrometers * vres). Divide by ``vres`` for microns.
+        node_nid: (M,) int64 owning neuron, 1-based (matches ``neur_num``).
+        node_parent: (M,) int64 parent node index; -1 for a soma root.
+        node_dist: (M,) float64 path length from the soma, in full-res voxels.
+        node_r: (M,) int64 branch radius in voxels (the taper actually used).
+        node_iter: (M,) int64 growth iteration the node appeared on; -1 for the
+                   soma roots, which exist before the first iteration.
+        attractors: (A, 3) float64 attractor positions, full-res voxels.
+        attractor_killed_iter: (A,) int64 iteration each attractor was consumed
+                   on; -1 if it survived to the end.
+        n_iters: number of growth iterations actually executed.
+        vres: voxels per micron, so consumers can convert without the params.
+    """
+    node_pos: np.ndarray
+    node_nid: np.ndarray
+    node_parent: np.ndarray
+    node_dist: np.ndarray
+    node_r: np.ndarray
+    node_iter: np.ndarray
+    attractors: np.ndarray
+    attractor_killed_iter: np.ndarray
+    n_iters: int
+    vres: float
+
+
+@dataclass
 class DendriteResult:
     """Result of dendrite growth.
 
@@ -32,11 +73,14 @@ class DendriteResult:
         dend_params: Updated dendrite parameters.
         gp_soma: Updated soma data. List of tuples (soma_indices, smoothed_body)
                  per neuron.
+        growth_graph: Pre-rasterization dendrite tree, or None. Only filled by
+                      strategy='space_colonization' with capture_growth=True.
     """
     neur_num: np.ndarray
     dendrite_ad: np.ndarray
     dend_params: DendParams
     gp_soma: list
+    growth_graph: Optional[DendriteGrowthGraph] = None
 
 
 @dataclass
@@ -913,6 +957,7 @@ def _grow_dendrites_space_colonization(
     vessel_mask: Optional[np.ndarray],
     positions: np.ndarray,
     seed: Optional[int] = None,
+    capture_growth: bool = False,
     verbose: Optional[int] = None,
 ) -> DendriteResult:
     """Space-colonization dendrite growth (strategy='space_colonization').
@@ -983,18 +1028,23 @@ def _grow_dendrites_space_colonization(
             allroots[j].astype(np.float64) + rad[:, None] * u * aspect)
     np.clip(attr, 0.0, hi, out=attr)
     attr_alive = np.ones(len(attr), dtype=bool)
+    attr_kill_iter = np.full(len(attr), -1, dtype=np.int64)
 
     # --- Nodes: one root per neuron at its soma; grow the forest. ---
     node_pos = allroots.astype(np.float64).copy()
     node_nid = np.arange(1, N_neur + 1, dtype=np.int64)
     node_parent = np.full(N_neur, -1, dtype=np.int64)
     node_dist = np.zeros(N_neur, dtype=np.float64)  # path distance from soma
+    # Iteration each node appeared on; -1 = soma root (predates iteration 0).
+    node_iter = np.full(N_neur, -1, dtype=np.int64)
+    n_iters = 0
 
     if verbosity >= 1:
         print(f"Growing dendrites via space colonization: N={N_neur}, "
               f"{len(attr)} attractors, step={D:.1f} infl={d_i:.0f} kill={d_k:.0f}")
 
-    for _ in range(max_iter):
+    for it in range(max_iter):
+        n_iters = it
         alive = np.flatnonzero(attr_alive)
         if alive.size == 0:
             break
@@ -1018,9 +1068,13 @@ def _grow_dendrites_space_colonization(
         node_nid = np.concatenate([node_nid, node_nid[grow]])
         node_parent = np.concatenate([node_parent, grow.astype(np.int64)])
         node_dist = np.concatenate([node_dist, node_dist[grow] + D])
+        node_iter = np.concatenate([node_iter, np.full(grow.size, it, dtype=np.int64)])
+        n_iters = it + 1
         # consume attractors reached by any (new) node
         dk, _ = cKDTree(node_pos).query(attr[alive], k=1)
-        attr_alive[alive[dk <= d_k]] = False
+        killed = alive[dk <= d_k]
+        attr_alive[killed] = False
+        attr_kill_iter[killed] = it
 
     # --- Per-node branch radius (dendrites have girth; taper = thinner out) ---
     #   'none'     : uniform sc_thickness (cheapest).
@@ -1119,11 +1173,20 @@ def _grow_dendrites_space_colonization(
     dendrite_ad = np.zeros(tuple(fulldims), dtype=np.uint16)
     gp_soma_out = [(gp_soma_input[kk], np.array([], dtype=np.int32))
                    for kk in range(N_neur)]
+    graph = None
+    if capture_growth:
+        graph = DendriteGrowthGraph(
+            node_pos=node_pos, node_nid=node_nid, node_parent=node_parent,
+            node_dist=node_dist, node_r=node_r, node_iter=node_iter,
+            attractors=attr, attractor_killed_iter=attr_kill_iter,
+            n_iters=int(n_iters), vres=float(vres),
+        )
     if verbosity >= 1:
         total = int(np.sum((neur_num > 0) & (neur_soma == 0)))
         print(f"done. Space-colonization dendrite voxels: {total}")
     return DendriteResult(neur_num=neur_num, dendrite_ad=dendrite_ad,
-                          dend_params=dend_params, gp_soma=gp_soma_out)
+                          dend_params=dend_params, gp_soma=gp_soma_out,
+                          growth_graph=graph)
 
 
 def grow_neuron_dendrites(
@@ -1136,6 +1199,7 @@ def grow_neuron_dendrites(
     freeze_obstruction: bool = False,
     seed: Optional[int] = None,
     strategy: str = "morphology",
+    capture_growth: bool = False,
     verbose: Optional[int] = None,
 ) -> DendriteResult:
     """
@@ -1154,6 +1218,9 @@ def grow_neuron_dendrites(
         vessel_mask: Optional 3D vessel mask (same shape as neur_soma).
         positions: (N, 3) neuron center positions in micrometers.
         rotation_angles: Optional list of per-neuron (3,) rotation angles.
+        capture_growth: Keep the pre-rasterization dendrite tree in
+            ``DendriteResult.growth_graph`` (space_colonization only). Off by
+            default because the graph outlives the voxels it produced.
         verbose: Verbosity override. If None, uses vol_params.verbose.
 
     Returns:
@@ -1174,7 +1241,14 @@ def grow_neuron_dendrites(
     if strategy == "space_colonization":
         return _grow_dendrites_space_colonization(
             vol_params, dend_params, neural_volume, vessel_mask,
-            positions, seed=seed, verbose=verbose,
+            positions, seed=seed, capture_growth=capture_growth,
+            verbose=verbose,
+        )
+    if capture_growth:
+        raise ValueError(
+            "capture_growth is only available for strategy="
+            "'space_colonization' (the other strategies never build an "
+            "explicit node tree)."
         )
     if strategy != "morphology":
         raise ValueError(
