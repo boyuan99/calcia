@@ -22,14 +22,20 @@ def main(argv=None):
     ap.add_argument("--out", help="output directory (default: <results>/analysis or <gt>/seg_eval)")
     ap.add_argument("--no-figures", action="store_true")
     ap.add_argument("--radius-um", type=float, default=10.0, help="confusability merge radius (um)")
+    ap.add_argument("--criterion", default=None,
+                    choices=["identifiability", "percentile", "absolute_snr", "functional"],
+                    help="detectability standard (default: identifiability, which "
+                         "needs a cached footprints_all.npz in the run directory)")
     args = ap.parse_args(argv)
 
     from . import report
     from .confusability import ConfusabilityConfig, analyze
-    from .detectability import characterize
+    from .detectability import DetectabilityConfig
+
+    cfg = DetectabilityConfig(criterion=args.criterion) if args.criterion else None
 
     if not args.results:
-        gt, det, conf = report.characterize_run(args.gt)
+        gt, det, conf = report.characterize_run(args.gt, cfg)
         print(det.summary()); print(conf.summary())
         return
 
@@ -37,7 +43,7 @@ def main(argv=None):
     results = report.discover(args.results)
     print(f"discovered {len(results)} results:", ", ".join(r.name for r in results))
     # allow overriding the confusability radius via a re-characterise
-    gt, det, _ = report.characterize_run(args.gt)
+    gt, det, _ = report.characterize_run(args.gt, cfg)
     conf = analyze(gt, det, ConfusabilityConfig(radius_um=args.radius_um))
     records = [report.evaluate_result(gt, det, conf, r) for r in results]
     os.makedirs(out, exist_ok=True)

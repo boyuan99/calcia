@@ -18,9 +18,16 @@ rank within the infected, in-FOV population) and a discrete ``category``:
 
     ``uninfected`` < ``invisible`` < ``hard`` < ``detectable`` < ``easy``
 
-Two criteria (``DetectabilityConfig.criterion``) decide the category:
+Four criteria (``DetectabilityConfig.criterion``) decide the category:
 
-  * ``"percentile"`` (default) — the *relative* rank above. Self-referential:
+  * ``"identifiability"`` (default) — the exact Cramer-Rao bound. Asks not "does
+    this cell deliver enough photons?" but "after every OTHER thing in the movie
+    has been given the chance to explain this cell's footprint, how much of it is
+    left?". One global Cholesky over all components gives every cell's
+    ``||P_perp A_i||_{Sigma^-1}`` exactly, with no neighbour cap. Lives in
+    :mod:`calcia.benchmark.identifiability`, which documents its open issues.
+    Expensive: needs a cached all-component footprint render (~40 min once).
+  * ``"percentile"`` — the *relative* rank above. Self-referential:
     "detectable" just means "brighter than the pool median", so it ranks cells
     but never says whether any of them actually clears the noise floor.
   * ``"absolute_snr"`` — a *physical* standard. Each cell's footprint is read
@@ -29,6 +36,9 @@ Two criteria (``DetectabilityConfig.criterion``) decide the category:
     is measured against the run's own noise model. Thresholds (``snr_*``) are
     absolute, so counts are comparable across runs and calibratable to real data.
     Needs a run loaded via :meth:`GroundTruth.from_run` (mov_clean + noise params).
+  * ``"functional"`` — the oracle-free detection SNR a blind functional segmenter
+    could reach: the cell's own transient brightening, discounted by how much of
+    its footprint it spatially owns, over the real noise floor.
 """
 
 from __future__ import annotations
@@ -48,8 +58,13 @@ class DetectabilityConfig:
     infected_eps: float = 1e-3        # trace max below this => not infected
 
     # Which standard decides "detectable":
-    #   "percentile"   -> relative rank of the optical-brightness proxy (default,
-    #                     needs only traces + optics masks; self-referential).
+    #   "identifiability" -> exact Cramer-Rao bound (default): the cell's activity
+    #                     times the part of its footprint that survives competition
+    #                     from EVERY other component in the movie, over the real
+    #                     noise floor. Needs a cached all-component render; see
+    #                     calcia.benchmark.identifiability.
+    #   "percentile"   -> relative rank of the optical-brightness proxy (needs
+    #                     only traces + optics masks; self-referential).
     #   "absolute_snr" -> physical peak SNR of each cell's rendered footprint
     #                     against the run's real noise floor (needs mov_clean +
     #                     noise params; thresholds are absolute, cross-run comparable).
@@ -60,7 +75,7 @@ class DetectabilityConfig:
     #                     brightening, discounted by how much of its footprint it
     #                     spatially owns (vs brighter overlapping neighbours),
     #                     over the real noise floor. Continuous, emergent, no fit.
-    criterion: str = "percentile"
+    criterion: str = "identifiability"
 
     # --- percentile-criterion band edges (optical-brightness pct in the pool) ---
     # < p_invisible -> invisible ; [p_invisible, p_hard) -> hard ;
@@ -87,8 +102,31 @@ class DetectabilityConfig:
     kernel_energy: float = 0.95
     # Per-FOV false-alarm rate for the OPTIONAL detection-theory binary cut. This
     # is a detector property (fixed across runs); the number of neurons above the
-    # resulting SNR line is emergent, never fitted to a target count.
+    # resulting SNR line is emergent, never fitted to a target count. Shared with
+    # the identifiability criterion, which draws the same Bonferroni line.
     false_alarm: float = 0.05
+
+    # --- identifiability-criterion knobs (see benchmark/identifiability.py) ---
+    # Cached all-component footprint render. None -> <run_dir>/footprints_all.npz.
+    # The criterion never renders one behind your back: it is a ~40 min job, so a
+    # missing render is an error that tells you what to run.
+    crb_footprints: str = None
+    # Ridge added to the UNIT-DIAGONAL Fisher matrix, so it is a pure number
+    # referred to the noise: it asserts prior knowledge worth this fraction of one
+    # isolated, noise-limited look at the cell, and floors the surviving-footprint
+    # fraction at sqrt(crb_ridge).
+    crb_ridge: float = 1e-8
+    # A pixel enters the whitened design only if it was inside the sensor in at
+    # least this fraction of the motion-corrected frames.
+    crb_min_valid: float = 0.95
+    # Motion-corrected samples at or below this value are edge fill, not photons,
+    # and are excluded from the DC estimate the noise model is evaluated at.
+    crb_fill_below: float = 1.0
+    # Resolution-element scale (movie px) the inherited Bonferroni cut is drawn
+    # at: n_res = H*W / (pi * (crb_patch_px/6)^2). See OPEN ISSUE 1 in
+    # identifiability.py -- this cut was calibrated at a different scale.
+    crb_patch_px: int = 61
+    crb_verbose: bool = False
 
 
 @dataclass
@@ -112,8 +150,13 @@ class Detectability:
     # populated only by the absolute_snr criterion (None under percentile):
     snr_peak: np.ndarray = None       # single-frame matched-filter SNR (decision var)
     snr_temporal: np.ndarray = None   # whole-trace spatio-temporal matched-filter SNR
-    # populated only by the functional criterion (None otherwise):
-    detect_snr: np.ndarray = None     # continuous oracle-free detection SNR (the star output)
+    # populated by the functional criterion (continuous oracle-free detection SNR)
+    # and by the identifiability criterion (the exact Cramer-Rao d'):
+    detect_snr: np.ndarray = None
+    # populated only by the identifiability criterion (None otherwise): the
+    # global-CRB diagnostics -- gain, rank, condition number, surviving footprint
+    # fraction, the cut, and where the render came from.
+    identifiability: dict = None
 
     def mask(self, *cats: str) -> np.ndarray:
         """Boolean mask selecting neurons in any of the given categories."""
@@ -142,20 +185,28 @@ class Detectability:
 def characterize(gt: GroundTruth, cfg: DetectabilityConfig | None = None) -> Detectability:
     """Characterise per-neuron detectability under the configured criterion.
 
-    ``cfg.criterion == "percentile"`` (default) ranks the optical-brightness
-    proxy within the pool; ``"absolute_snr"`` computes each cell's physical peak
-    SNR against the run's real noise floor (requires a run loaded with its clean
-    movie and noise params, i.e. ``GroundTruth.from_run``). Both return the same
-    ``Detectability`` shape, so every downstream benchmark module is unaffected.
+    ``cfg.criterion == "identifiability"`` (default) is the exact Cramer-Rao
+    bound: how much of each cell's footprint survives competition from every
+    other component in the movie (needs a run on disk plus a cached all-component
+    render). ``"percentile"`` ranks the optical-brightness proxy within the pool;
+    ``"absolute_snr"`` computes each cell's physical peak SNR against the run's
+    real noise floor; ``"functional"`` the oracle-free blind detection SNR. All
+    four return the same ``Detectability`` shape, so every downstream benchmark
+    module is unaffected.
     """
     cfg = cfg or DetectabilityConfig()
+    if cfg.criterion == "identifiability":
+        # imported here, not at module scope: identifiability imports this module
+        from .identifiability import characterize_identifiability
+        return characterize_identifiability(gt, cfg)
     if cfg.criterion == "absolute_snr":
         return _characterize_absolute(gt, cfg)
     if cfg.criterion == "functional":
         return _characterize_functional(gt, cfg)
     if cfg.criterion != "percentile":
         raise ValueError(f"unknown detectability criterion {cfg.criterion!r} "
-                         "(expected 'percentile', 'absolute_snr' or 'functional')")
+                         "(expected 'identifiability', 'percentile', "
+                         "'absolute_snr' or 'functional')")
     return _characterize_percentile(gt, cfg)
 
 

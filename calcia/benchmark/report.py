@@ -19,16 +19,19 @@ from typing import List, Optional
 import numpy as np
 
 from .gt import GroundTruth
-from .detectability import characterize, Detectability, CATEGORIES
+from .detectability import (characterize, Detectability, DetectabilityConfig,
+                            CATEGORIES)
 from .confusability import analyze, Confusability
 from .loaders import (AlgoResult, load_deepwonder, load_cnmfe, load_min1pipe,
                       load_count_only)
 from . import matching, metrics, downstream
 
 
-def characterize_run(run_dir: str):
+def characterize_run(run_dir: str, cfg: DetectabilityConfig | None = None):
+    """``(gt, det, conf)`` for a run. ``cfg`` picks the detectability criterion;
+    the default one needs a cached footprint render in the run directory."""
     gt = GroundTruth.from_run(run_dir)
-    det = characterize(gt)
+    det = characterize(gt, cfg)
     conf = analyze(gt, det)
     return gt, det, conf
 

@@ -45,7 +45,9 @@ def gt():
 
 
 def test_detectability_categories(gt):
-    det = characterize(gt)
+    # explicit: the default criterion is "identifiability", which needs a run on
+    # disk (an all-component footprint render); this fixture is in-memory only.
+    det = characterize(gt, DetectabilityConfig(criterion="percentile"))
     # 20% uninfected by construction
     assert det.counts["uninfected"] == 8
     assert det.infected.sum() == 32
@@ -226,13 +228,31 @@ def test_absolute_snr_requires_movie():
         characterize(gt, DetectabilityConfig(criterion="absolute_snr"))
 
 
+def test_identifiability_requires_a_render():
+    """The DEFAULT criterion needs a run on disk plus a cached all-component
+    footprint render. Without them it must fail loudly and say what to run, never
+    quietly answer a different question with another criterion."""
+    rng = np.random.default_rng(5)
+    locs = np.column_stack([np.arange(3) * 20 + 10, np.full(3, 10), np.full(3, 30.)]).astype(float)
+    traces = np.abs(rng.standard_normal((3, 50))).astype(np.float32) + 1
+    gt = GroundTruth(locs, traces, None, 0.05, (60, 60), 1, 1, 0, 70, 30,
+                     noise_params=CameraNoiseParams(qe=1.0, gain_e_per_adu=1.0))
+    assert DetectabilityConfig().criterion == "identifiability"
+    with pytest.raises(ValueError, match="identifiability"):
+        characterize(gt)
+    # and a missing render on a real run names the function that builds it
+    with pytest.raises(ValueError, match="render_footprints"):
+        characterize(gt, DetectabilityConfig(crb_footprints="no/such/file.npz"))
+
+
 def test_confusability_pairs_close_cells():
     rng = np.random.default_rng(1)
     # two bright cells 3 um apart -> must be a confusable pair
     locs = np.array([[50, 50, 30.], [50, 53, 30.], [150, 150, 30.]])
     traces = np.abs(rng.standard_normal((3, 200))).astype(np.float32) + 1
     gt = GroundTruth(locs, traces, None, 0.05, (200, 200), 1, 1, 0, 70, 30)
-    det = characterize(gt, DetectabilityConfig(detectable_percentile=0))
+    det = characterize(gt, DetectabilityConfig(criterion="percentile",
+                                               detectable_percentile=0))
     conf = analyze(gt, det, ConfusabilityConfig(radius_um=10, brightness_percentile=0))
     assert len(conf.pairs) == 1
     assert set(conf.pairs[0]) == {0, 1}
@@ -247,7 +267,8 @@ def _result_from_gt(gt, idxs, name="algo", jitter=0.0, traces=None, masks=None):
 
 
 def test_matching_recovers_planted_detections(gt):
-    det = characterize(gt); conf = analyze(gt, det)
+    det = characterize(gt, DetectabilityConfig(criterion="percentile"))
+    conf = analyze(gt, det)
     idxs = np.where(det.detectable)[0]
     res = _result_from_gt(gt, idxs, jitter=0.5)
     cal = matching.calibrate(gt, res)
@@ -269,7 +290,8 @@ def test_merge_detection():
     locs = np.array(anchors + cluster)
     traces = (np.abs(rng.standard_normal((6, 200))).astype(np.float32) + 1) * 3
     gt = GroundTruth(locs, traces, None, 0.05, (200, 200), 1, 1, 0, 70, 30)
-    det = characterize(gt, DetectabilityConfig(detectable_percentile=0))
+    det = characterize(gt, DetectabilityConfig(criterion="percentile",
+                                               detectable_percentile=0))
     conf = analyze(gt, det, ConfusabilityConfig(radius_um=10, brightness_percentile=0))
     W = gt.movie_shape[1]
 
@@ -292,7 +314,8 @@ def test_merge_detection():
 
 
 def test_downstream_detects_contamination(gt):
-    det = characterize(gt); conf = analyze(gt, det)
+    det = characterize(gt, DetectabilityConfig(criterion="percentile"))
+    conf = analyze(gt, det)
     idxs = np.where(det.detectable)[0]
     # contaminate every recovered trace with a shared component -> spurious corr
     shared = _event_trace(np.random.default_rng(9), gt.nt, amp=2.0)
@@ -306,7 +329,8 @@ def test_downstream_detects_contamination(gt):
 
 
 def test_clean_downstream_has_low_distortion(gt):
-    det = characterize(gt); conf = analyze(gt, det)
+    det = characterize(gt, DetectabilityConfig(criterion="percentile"))
+    conf = analyze(gt, det)
     idxs = np.where(det.detectable)[0]
     res = _result_from_gt(gt, idxs)          # exact GT traces
     cal = matching.calibrate(gt, res); mt = matching.match(gt, res, cal)

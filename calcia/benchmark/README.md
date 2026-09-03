@@ -39,8 +39,23 @@ optical_brightness = mol_brightness      (expression x fluorophore; from the tra
 `uninfected` (AAV never expressed) · `out_of_fov` · `invisible` · `hard` ·
 `detectable` · `easy`
 
-The **detectable pool** (infected, in-FOV, above a brightness percentile) is the
-*fair* recall denominator — uninfected/invisible cells never had a chance.
+The **detectable pool** is the *fair* recall denominator — uninfected/invisible
+cells never had a chance.
+
+Which standard draws that line is `DetectabilityConfig.criterion`:
+
+| criterion | asks | needs |
+|---|---|---|
+| `identifiability` (**default**) | after every *other* component in the movie has had the chance to explain this cell's footprint, how much is left? Exact Cramér–Rao bound, one global Cholesky, no neighbour cap. | a run on disk + a cached all-component render (~40 min once, see `identifiability.py`) |
+| `percentile` | is it brighter than the pool median? (relative, self-referential) | traces + optics masks |
+| `absolute_snr` | does its rendered footprint clear the real noise floor, using the GT trace as a matched filter? (upper bound) | `mov_clean` + noise params |
+| `functional` | could a *blind* segmenter tell its transient from noise and from its neighbours? | `mov_clean` + noise params |
+
+The default is expensive and fails loudly if its render is missing — it never
+silently falls back to another criterion. Build the cache once with
+`identifiability.render_footprints(gt)`. Read that module's docstring before
+quoting a count: the binary cut is inherited from `functional` and was calibrated
+at a different scale, and the bound is for *linear* unmixing.
 
 ### 2. `confusability` — who gets merged
 Builds a graph over bright neighbours within `radius_um`; connected components
