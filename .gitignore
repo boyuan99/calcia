@@ -45,7 +45,18 @@ comparison_tools/*.mat
 # Root-level generated images
 *.png
 
+# Web showcase: the page is source, its assets are build output.
+# Both `*.png` and `*.npz` above are bare patterns, so they match at ANY depth --
+# without these negations a rebuilt asset would be silently untracked.
+web/site/assets/
+!web/site/*.html
+!web/site/*.css
+!web/site/*.js
+
 # OS
 .DS_Store
 Thumbs.db
 nul
+
+# aws deploy settings (account-specific)
+web/.aws-deploy.env

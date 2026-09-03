@@ -1,0 +1,215 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>calcia — grow a brain, then photograph it</title>
+<meta name="description" content="A physics-based simulator for calcium imaging: neural tissue built from first principles, then imaged through a simulated microscope.">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body data-lang="en">
+
+<div class="calcia-showcase">
+
+<!-- ============================================================ language -->
+<div class="langbar">
+  <button class="lang-btn is-on" data-set-lang="en">EN</button>
+  <button class="lang-btn" data-set-lang="zh">中文</button>
+</div>
+
+<!-- ================================================================ hero -->
+<section class="hero" id="hero">
+  <div class="hero-media">
+    <canvas id="growth-canvas" aria-label="Four neurons growing, rendered live"></canvas>
+    <img class="hero-fallback" id="hero-fallback" alt="" hidden>
+    <div class="hero-scrim"></div>
+  </div>
+
+  <div class="hero-copy">
+    <p class="eyebrow">calcia · <span class="en">physics-based calcium-imaging simulator</span><span class="zh">基于物理的钙成像模拟器</span></p>
+    <h1>
+      <span class="en">Grow a brain.<br>Then photograph it.</span>
+      <span class="zh">先长出一块大脑，<br>再给它拍照。</span>
+    </h1>
+    <p class="lede">
+      <span class="en">calcia builds neural tissue from first principles — vasculature, somata, dendrites, expression — and then simulates the microscope that images it. Nothing below was drawn by hand.</span>
+      <span class="zh">calcia 从第一性原理构建神经组织——血管、胞体、树突、表达——再模拟给它成像的显微镜。下面没有一帧是手画的。</span>
+    </p>
+    <div class="hero-caption" id="hero-caption" aria-live="polite"></div>
+
+    <div class="hero-ctrl" id="hero-ctrl">
+      <button class="hbtn" id="hero-play" aria-label="pause">
+        <span class="ico-pause"></span>
+      </button>
+      <input type="range" id="hero-scrub" min="0" max="1000" value="0"
+             aria-label="scrub growth">
+      <span class="hero-hint">
+        <span class="en">drag the scene to orbit</span><span class="zh">拖动画面可旋转</span>
+      </span>
+    </div>
+  </div>
+
+  <div class="hero-track" id="hero-track" aria-hidden="true"></div>
+
+  <div class="hero-stats" id="hero-stats"></div>
+</section>
+
+<!-- ============================================================= compare -->
+<section class="band split" id="compare-band">
+  <div class="band-head">
+    <h2><span class="en">One parameter. Two worlds.</span><span class="zh">一个参数，两个世界。</span></h2>
+    <p><span class="en">Same tissue. Same cells. Same spikes. The only difference is whether light is allowed to scatter on its way out of the brain — and that single number decides whether anything is resolvable at all.</span>
+       <span class="zh">同一块组织、同一批细胞、同一串放电。唯一的区别是光在出脑的路上允不允许散射——而就是这一个数，决定了你还能不能分辨出任何东西。</span></p>
+  </div>
+  <div class="compare" id="compare">
+    <video class="cmp-video cmp-a" data-lazy-video muted loop playsinline preload="none"></video>
+    <div class="cmp-clip"><video class="cmp-video cmp-b" data-lazy-video muted loop playsinline preload="none"></video></div>
+    <div class="cmp-handle" id="cmp-handle"><span></span></div>
+    <div class="cmp-label cmp-label-l"><span class="en">no scattering</span><span class="zh">无散射</span></div>
+    <div class="cmp-label cmp-label-r"><span class="en">real tissue</span><span class="zh">真实组织</span></div>
+  </div>
+</section>
+
+<!-- ======================================================== ground truth -->
+<section class="band split" id="gt-band">
+  <div class="split-rail">
+    <div class="band-head">
+      <h2><span class="en">We know where every cell is.</span><span class="zh">每一个细胞在哪，我们都知道。</span></h2>
+      <p><span class="en">This is the part real microscopy can never give you. Every dot is a neuron we placed, with a position we wrote down before the first photon was simulated. Drag the threshold to see how many of them the imaging actually gives back.</span>
+         <span class="zh">这是真实显微镜永远给不了你的东西。每个点都是我们亲手放进去的神经元，位置在第一个光子被模拟之前就已写定。拖动阈值，看看成像最后还能还给你几个。</span></p>
+    </div>
+    <div class="gt-side">
+        <label class="ctrl">
+          <span class="ctrl-label">
+            <span class="en">peak ΔF/F threshold</span><span class="zh">峰值 ΔF/F 阈值</span>
+            <b id="gt-thresh-val">0.00</b>
+          </span>
+          <input type="range" id="gt-thresh" min="0" max="100" value="45">
+        </label>
+        <div class="gt-readout" id="gt-readout"></div>
+        <label class="ctrl checkbox">
+          <input type="checkbox" id="gt-show" checked>
+          <span><span class="en">show ground truth</span><span class="zh">显示真值</span></span>
+        </label>
+        <p class="fineprint" id="gt-verify"></p>
+    </div>
+  </div>
+  <div class="gt-stage" id="gt-stage">
+      <video class="gt-video" id="gt-video" data-lazy-video muted loop playsinline preload="none"></video>
+      <canvas class="gt-overlay" id="gt-overlay"></canvas>
+    </div>
+</section>
+
+<!-- ============================================================== traces -->
+<section class="band split" id="traces-band">
+  <div class="band-head">
+    <h2><span class="en">Click a cell. That is its calcium.</span><span class="zh">点一个细胞，那就是它的钙信号。</span></h2>
+    <p><span class="en">Every trace is the ground-truth fluorescence of one neuron, frame-aligned with the movie above it. In a real recording you would have to infer these. Here they are simply known.</span>
+       <span class="zh">每条曲线都是一个神经元的真值荧光，与上方影片逐帧对齐。真实记录里这些只能靠推断，在这里它们是已知的。</span></p>
+  </div>
+  <div class="traces-wrap">
+    <canvas id="traces-static"></canvas>
+    <canvas id="traces-play"></canvas>
+  </div>
+</section>
+
+<!-- ============================================================ pipeline -->
+<section class="band" id="pipeline-band">
+  <div class="band-head">
+    <h2><span class="en">Five stages, no shortcuts.</span><span class="zh">五个阶段，没有捷径。</span></h2>
+  </div>
+  <ol class="pipeline">
+    <li>
+      <span class="step">01</span>
+      <h3><span class="en">Tissue</span><span class="zh">组织</span></h3>
+      <p><span class="en">Vessels are grown as a graph and routed by Dijkstra; somata are sampled by exclusion around them; dendrites colonize whatever space is left.</span>
+         <span class="zh">血管以图的形式生长并用 Dijkstra 布线；胞体在其周围按排斥采样；树突去占领剩下的空间。</span></p>
+    </li>
+    <li>
+      <span class="step">02</span>
+      <h3><span class="en">Optics</span><span class="zh">光学</span></h3>
+      <p><span class="en">A Fresnel wave-optics point spread function, broadened by tissue scattering. This is the picture of the microscope itself.</span>
+         <span class="zh">菲涅耳波动光学点扩散函数，再由组织散射展宽。这就是显微镜本身的样子。</span></p>
+      <figure class="psf"><img id="psf-img" alt="Point spread function, lateral and axial" loading="lazy"></figure>
+    </li>
+    <li>
+      <span class="step">03</span>
+      <h3><span class="en">Calcium</span><span class="zh">钙动力学</span></h3>
+      <p><span class="en">Spikes drive a calcium binding model, which drives indicator saturation. The indicator's own nonlinearity is in there, not bolted on afterwards.</span>
+         <span class="zh">放电驱动钙结合模型，再驱动指示剂饱和。指示剂自身的非线性在模型里，而不是事后叠加。</span></p>
+    </li>
+    <li>
+      <span class="step">04</span>
+      <h3><span class="en">Scan</span><span class="zh">扫描</span></h3>
+      <p><span class="en">The volume is convolved with the PSF and sampled the way the instrument samples it, with breathing- and heartbeat-shaped motion applied during the exposure.</span>
+         <span class="zh">体积与 PSF 卷积，并按仪器真实的采样方式采样，曝光期间叠加呼吸与心跳形状的运动。</span></p>
+    </li>
+    <li>
+      <span class="step">05</span>
+      <h3><span class="en">Noise</span><span class="zh">噪声</span></h3>
+      <p><span class="en">Poisson, then lognormal gain, then read noise — in that order, because that is the order the photons meet them.</span>
+         <span class="zh">先泊松、再对数正态增益、最后读出噪声——顺序如此，因为光子就是按这个顺序遇到它们的。</span></p>
+      <div class="noise-pair">
+        <figure><video id="v-clean" data-lazy-video muted loop playsinline preload="none"></video><figcaption><span class="en">before noise</span><span class="zh">加噪前</span></figcaption></figure>
+        <figure><video id="v-noisy" data-lazy-video muted loop playsinline preload="none"></video><figcaption><span class="en">what the camera records</span><span class="zh">相机记录到的</span></figcaption></figure>
+      </div>
+    </li>
+  </ol>
+</section>
+
+<!-- ============================================================== series -->
+<section class="band bleed" id="series-band">
+  <div class="band-head">
+    <h2><span class="en">Not one brain. A population of them.</span><span class="zh">不是一块脑子，而是一整群。</span></h2>
+    <p><span class="en">Change the seed and the vasculature, the cell placement and the expression all change with it. A method that only works on one volume does not work.</span>
+       <span class="zh">换一个随机种子，血管、细胞排布、表达强度就全都跟着变。只在一个体积上成立的方法，等于不成立。</span></p>
+  </div>
+  <figure class="series">
+    <video id="series-video" data-lazy-video muted loop playsinline preload="none"></video>
+  </figure>
+</section>
+
+<!-- ================================================================ perf -->
+<section class="band band-quiet split" id="perf-band">
+  <div class="band-head">
+    <h2><span class="en">What this page costs your laptop</span><span class="zh">这个页面让你的电脑付出了什么</span></h2>
+    <p><span class="en">Almost nothing, on purpose. The 3D is genuinely rendered here, in about 330 lines of WebGL with no library — but growth is not animated on the CPU. Every dendrite segment carries the growth iteration it was born on, and the vertex shader decides what exists yet. Nothing is rebuilt per frame.</span>
+       <span class="zh">刻意做到几乎为零。3D 是真的在你的浏览器里渲染的，约 330 行 WebGL、零依赖库——但生长不是靠 CPU 逐帧算的。每一段树突都带着它诞生的那一次迭代，由顶点着色器决定此刻哪些存在。每帧不重建任何东西。</span></p>
+  </div>
+  <table class="perf">
+    <thead><tr>
+      <th><span class="en">Section</span><span class="zh">板块</span></th>
+      <th><span class="en">What runs in your browser</span><span class="zh">在你浏览器里跑的东西</span></th>
+    </tr></thead>
+    <tbody>
+      <tr><td><span class="en">Growth scene</span><span class="zh">生长场景</span></td><td><span class="en">one static vertex buffer; per frame the page writes a single float and issues four draw calls</span><span class="zh">一个静态顶点缓冲；每帧只写一个浮点数、发四次绘制调用</span></td></tr>
+      <tr><td><span class="en">Its payload</span><span class="zh">它的数据量</span></td><td><span class="en">333 KB of geometry, uploaded to the GPU once — versus 9.4 MB of video decoded continuously</span><span class="zh">333 KB 几何数据，只上传一次——而视频版是 9.4 MB 且要持续解码</span></td></tr>
+      <tr><td><span class="en">Compare slider</span><span class="zh">对比滑块</span></td><td><span class="en">a CSS clip rectangle</span><span class="zh">一个 CSS 裁剪矩形</span></td></tr>
+      <tr><td><span class="en">Ground truth</span><span class="zh">真值叠加</span></td><td><span class="en">a few hundred canvas circles, redrawn only on input</span><span class="zh">数百个 canvas 圆，仅在交互时重绘</span></td></tr>
+      <tr><td><span class="en">Traces</span><span class="zh">曲线</span></td><td><span class="en">static canvas + a one-pixel playhead</span><span class="zh">静态 canvas + 一根 1 像素游标</span></td></tr>
+      <tr><td><span class="en">Everything off-screen</span><span class="zh">屏幕外的一切</span></td><td><span class="en">the render loop stops; videos pause, unbuffered and undecoded</span><span class="zh">渲染循环停止；视频暂停、不缓冲、不解码</span></td></tr>
+    </tbody>
+  </table>
+</section>
+
+<footer class="foot">
+  <p id="foot-note"></p>
+  <p class="fineprint">
+    <span class="en">Rendered offline with <code>web/render_growth_film.py</code> and <code>web/build_site.py</code>. No real animal data is used or shipped on this page.</span>
+    <span class="zh">由 <code>web/render_growth_film.py</code> 与 <code>web/build_site.py</code> 离线渲染。本页不使用、也不分发任何真实动物数据。</span>
+  </p>
+</footer>
+
+<div class="offline-note" id="offline-note" hidden>
+  <span class="en">Data could not be loaded. Either run <code>python web/bundle_data.py</code> once (which inlines it so this folder opens straight off disk), or serve the folder over HTTP.</span>
+  <span class="zh">数据加载失败。要么先跑一次 <code>python web/bundle_data.py</code>（把数据内联进去，之后直接打开文件夹即可），要么用 HTTP 方式访问这个目录。</span>
+</div>
+
+</div>
+
+<!-- optional: written by web/bundle_data.py, lets the page run from file:// -->
+<script src="assets/data.js"></script>
+<script src="growth3d.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
